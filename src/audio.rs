@@ -258,20 +258,23 @@ mod test {
 
     #[test]
     fn test_mel_spectrogram() {
-        let audio = super::load_audio("test/data/jfk.flac").unwrap();
+        // for this test, we use pre-resampled audio that was resampled using
+        // ffmpeg so that our results will match the results of the official
+        // Whisper function, even though rust resample is confirmed to work
+        let audio = super::load_audio("test/data/jfk_resampled.wav").unwrap();
         let mel_filter = super::mel_filter();
-        let _actual = super::log_mel_spectrogram(&audio, &mel_filter);
-        let _expected = read_csv_2d("test/data/mel-spectrogram.csv").unwrap();
+        let actual = super::log_mel_spectrogram(&audio, &mel_filter);
+        let expected = read_csv_2d("test/data/mel-spectrogram.csv").unwrap();
 
         // based on manual inspection, the mel spectrogram works but the two
         // spectrograms differ slightly in a way that i don't know how to test
         // for automated-ly
 
-        // assert!(
-        //     actual.allclose(&expected, 0.1, 0.005, false),
-        //     "actual = {}, expected = {}",
-        //     actual,
-        //     expected
-        // );
+        assert!(
+            actual.allclose(&expected, 0.1, 0.005, false),
+            "actual = {}, expected = {}",
+            actual,
+            expected
+        );
     }
 }
