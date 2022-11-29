@@ -9,13 +9,13 @@ use symphonia::core::{
 use tch::{IndexOp, Kind, Tensor};
 
 // hard-coded audio hyperparameters
-const SAMPLE_RATE: i64 = 16000;
-const N_FFT: i64 = 400;
-const N_MELS: i64 = 80;
-const HOP_LENGTH: i64 = 160;
-const CHUNK_LENGTH: i64 = 30;
-const N_SAMPLES: i64 = CHUNK_LENGTH * SAMPLE_RATE; // 480000: number of samples in a chunk
-const N_FRAMES: i64 = N_SAMPLES / HOP_LENGTH; // 3000: number of frames in a mel spectrogram input
+pub const SAMPLE_RATE: i64 = 16000;
+pub const N_FFT: i64 = 400;
+pub const N_MELS: i64 = 80;
+pub const HOP_LENGTH: i64 = 160;
+pub const CHUNK_LENGTH: i64 = 30;
+pub const N_SAMPLES: i64 = CHUNK_LENGTH * SAMPLE_RATE; // 480000: number of samples in a chunk
+pub const N_FRAMES: i64 = N_SAMPLES / HOP_LENGTH; // 3000: number of frames in a mel spectrogram input
 
 pub fn load_audio(path: impl AsRef<Path>) -> anyhow::Result<Tensor> {
     // number of samples per chunk that we feed into the resampler
