@@ -206,7 +206,11 @@ impl ResidualAttentionBlock {
                     n_states,
                     nn::LinearConfig::default(),
                 )),
-            mlp_ln: nn::layer_norm(vs.borrow(), vec![n_states], nn::LayerNormConfig::default()),
+            mlp_ln: nn::layer_norm(
+                &vs / "mlp_ln",
+                vec![n_states],
+                nn::LayerNormConfig::default(),
+            ),
         }
     }
 
@@ -250,7 +254,7 @@ impl AudioEncoder {
     ) -> Self {
         Self {
             conv1: nn::conv1d(
-                vs.borrow(),
+                &vs / "conv1",
                 N_MELS,
                 n_states,
                 3,
@@ -260,7 +264,7 @@ impl AudioEncoder {
                 },
             ),
             conv2: nn::conv1d(
-                vs.borrow(),
+                &vs / "conv2",
                 n_states,
                 n_states,
                 3,
@@ -271,10 +275,10 @@ impl AudioEncoder {
                 },
             ),
             blocks: (0..n_layers)
-                .map(|i| ResidualAttentionBlock::new(&vs / i, n_states, n_heads, false))
+                .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, false))
                 .collect(),
             position_emb: sinsoids(n_ctxs, n_states, None),
-            ln_post: nn::layer_norm(vs.borrow(), vec![n_states], nn::LayerNormConfig::default()),
+            ln_post: nn::layer_norm(&vs / "ln_post", vec![n_states], nn::LayerNormConfig::default()),
         }
     }
 }
@@ -332,7 +336,7 @@ impl TextDecoder {
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
             blocks: (0..n_layers)
-                .map(|i| ResidualAttentionBlock::new(&vs / i, n_states, n_heads, true))
+                .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, true))
                 .collect(),
             ln_pre: nn::layer_norm(&vs / "ln", vec![n_states], nn::LayerNormConfig::default()),
         }
@@ -411,7 +415,7 @@ impl Whisper {
         }
     }
 
-    fn forward_ext(&self, mel: &Tensor, tokens: &Tensor) -> Tensor {
+    pub fn forward_ext(&self, mel: &Tensor, tokens: &Tensor) -> Tensor {
         self.decoder.forward_ext(tokens, &self.encoder.forward(mel))
     }
 }
