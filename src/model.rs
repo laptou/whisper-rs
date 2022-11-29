@@ -1,26 +1,9 @@
-use std::borrow::Borrow;
-
 use tch::{
     nn::{self, Module},
     Device, IndexOp, Kind, NewAxis, Tensor,
 };
 
 use crate::audio::N_MELS;
-
-#[derive(Clone, Copy, Debug)]
-pub struct ModelDimensions {
-    num_audio_ctxs: usize,
-    num_audio_states: usize,
-    num_audio_heads: usize,
-    num_audio_layers: usize,
-
-    vocab_size: usize,
-
-    num_text_ctxs: usize,
-    num_text_states: usize,
-    num_text_heads: usize,
-    num_text_layers: usize,
-}
 
 #[derive(Debug)]
 pub struct LayerNorm(nn::LayerNorm);
