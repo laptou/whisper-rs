@@ -1,0 +1,68 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'whisper'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--lib",
+          "--package=whisper"
+        ],
+        "filter": {
+          "name": "whisper",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug example 'ree'",
+      "cargo": {
+        "args": [
+          "build",
+          "--example=ree",
+          "--package=whisper"
+        ],
+        "filter": {
+          "name": "ree",
+          "kind": "example"
+        }
+      },
+      "env": {
+        "LD_LIBRARY_PATH": "/home/ibiyemi/projects/experiments/whisper-rs/target/debug/build/esaxx-rs-c3fb310d706e4508/out:/home/ibiyemi/projects/experiments/whisper-rs/target/debug/build/onig_sys-65d9c5019bbfe63a/out:/home/ibiyemi/projects/experiments/whisper-rs/target/debug/build/torch-sys-e6c97fcc94d2a6f2/out:/home/ibiyemi/projects/experiments/whisper-rs/target/debug/build/torch-sys-e6c97fcc94d2a6f2/out/libtorch/libtorch/lib:/home/ibiyemi/projects/experiments/whisper-rs/target/debug/build/zstd-sys-eb8ed083193f88e5/out:/home/ibiyemi/projects/experiments/whisper-rs/target/debug/deps:/home/ibiyemi/projects/experiments/whisper-rs/target/debug:/home/ibiyemi/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lb:/home/ibiyemi/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/lib",
+        "RUST_BACKTRACE": "1"
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in example 'ree'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--example=ree",
+          "--package=whisper"
+        ],
+        "filter": {
+          "name": "ree",
+          "kind": "example"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
