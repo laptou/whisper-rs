@@ -106,7 +106,7 @@ impl MultiHeadAttention {
             .view([k_size.0, k_size.1, self.n_heads, -1])
             .permute(&[0, 2, 3, 1])
             * scale;
-        let v = q
+        let v = v
             .view([v_size.0, v_size.1, self.n_heads, -1])
             .permute(&[0, 2, 1, 3]);
 
@@ -261,7 +261,11 @@ impl AudioEncoder {
                 .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, false))
                 .collect(),
             position_emb: sinsoids(n_ctxs, n_states, None),
-            ln_post: nn::layer_norm(&vs / "ln_post", vec![n_states], nn::LayerNormConfig::default()),
+            ln_post: nn::layer_norm(
+                &vs / "ln_post",
+                vec![n_states],
+                nn::LayerNormConfig::default(),
+            ),
         }
     }
 }
@@ -305,7 +309,6 @@ impl TextDecoder {
         n_states: i64,
         n_heads: i64,
         n_layers: i64,
-        position_emb: Tensor,
     ) -> Self {
         Self {
             token_emb: nn::embedding(
@@ -314,7 +317,7 @@ impl TextDecoder {
                 n_states,
                 nn::EmbeddingConfig::default(),
             ),
-            position_emb,
+            position_emb: Tensor::empty(&[n_ctxs, n_states], default_dtype()),
             mask: Tensor::empty(&[n_ctxs, n_ctxs], default_dtype())
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
@@ -329,7 +332,7 @@ impl TextDecoder {
     ///     the text tokens
     /// xa: shape = (batch_size, n_mels, n_audio_ctx)
     ///     the encoded audio features to be attended onxs: shape = (batch_size, n_mels, n_ctx)
-    fn forward_ext(&self, xs: &Tensor, xa: &Tensor) -> Tensor {
+    pub fn forward_ext(&self, xs: &Tensor, xa: &Tensor) -> Tensor {
         // offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         // x = self.token_embedding(x) + self.positional_embedding[offset : offset + x.shape[-1]]
         // x = x.to(xa.dtype)
@@ -362,39 +365,41 @@ impl TextDecoder {
 pub struct Whisper {
     pub encoder: AudioEncoder,
     pub decoder: TextDecoder,
+    pub dims: ModelDims,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct ModelDims {
+    pub n_vocab: i64,
+    pub n_audio_ctxs: i64,
+    pub n_audio_states: i64,
+    pub n_audio_heads: i64,
+    pub n_audio_layers: i64,
+    pub n_text_ctxs: i64,
+    pub n_text_states: i64,
+    pub n_text_heads: i64,
+    pub n_text_layers: i64,
 }
 
 impl Whisper {
-    pub fn new<'a>(
-        vs: nn::Path<'a>,
-        n_vocab: i64,
-        n_audio_ctxs: i64,
-        n_audio_states: i64,
-        n_audio_heads: i64,
-        n_audio_layers: i64,
-        n_text_ctxs: i64,
-        n_text_states: i64,
-        n_text_heads: i64,
-        n_text_layers: i64,
-        position_emb: Tensor,
-    ) -> Self {
+    pub fn new<'a>(vs: nn::Path<'a>, dims: ModelDims) -> Self {
         Self {
             encoder: AudioEncoder::new(
                 &vs / "encoder",
-                n_audio_ctxs,
-                n_audio_states,
-                n_audio_heads,
-                n_audio_layers,
+                dims.n_audio_ctxs,
+                dims.n_audio_states,
+                dims.n_audio_heads,
+                dims.n_audio_layers,
             ),
             decoder: TextDecoder::new(
                 &vs / "decoder",
-                n_vocab,
-                n_text_ctxs,
-                n_text_states,
-                n_text_heads,
-                n_text_layers,
-                position_emb,
+                dims.n_vocab,
+                dims.n_text_ctxs,
+                dims.n_text_states,
+                dims.n_text_heads,
+                dims.n_text_layers,
             ),
+            dims,
         }
     }
 

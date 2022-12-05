@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use once_cell::sync::Lazy;
-use tokenizers::Tokenizer;
+use tch::Tensor;
 
 pub const LANGUAGES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
     HashMap::from([
@@ -107,28 +107,78 @@ pub const LANGUAGES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
     ])
 });
 
-/// Simple implementation of tokenizer, only works for english.
-pub fn get_tokenizer() -> anyhow::Result<Tokenizer> {
-    let mut tok = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
-    let special_tokens: Vec<_> = IntoIterator::into_iter([
-        "<|startoftranscript|>",
-        "<|translate|>",
-        "<|transcribe|>",
-        "<|startoflm|>",
-        "<|startofprev|>",
-        "<|nospeech|>",
-        "<|notimestamps|>",
-    ])
-    .map(|s| s.to_owned())
-    .chain(LANGUAGES.keys().map(|t| format!("<|{t}|>")))
-    .map(|t| tokenizers::AddedToken::from(t, true))
-    .collect();
+/// A wrapper around HuggingFace tokenizer that allows fast access to common token IDs.
+#[derive(Debug)]
+pub struct Tokenizer {
+    pub tokenizer: tokenizers::Tokenizer,
+    pub token_id_sot: u32,
+    pub token_id_translate: u32,
+    pub token_id_transcribe: u32,
+    pub token_id_eot: u32,
+    pub token_id_notimestamps: u32,
+    pub token_id_nospeech: u32,
+    pub token_id_startofprev: u32,
+    pub token_id_startoflm: u32,
+}
 
-    // let bpe_builder = tokenizers::models::bpe::BPE::from_file("gpt2/vocab.json", "gpt2/merges.txt");
-    // let bpe = bpe_builder.unk_token("<|endoftext|>".to_owned()).build().unwrap();
-    // let mut tok = Tokenizer::new(bpe);
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Task {
+    LanguageId,
+    Translate,
+    Transcribe,
+}
 
-    tok.add_special_tokens(&special_tokens[..]);
+impl Tokenizer {
+    /// Simple implementation of tokenizer, only works for english.
+    pub fn new(task: Task) -> anyhow::Result<Self> {
+        assert_eq!(
+            task,
+            Task::Transcribe,
+            "multilingual tokenizer is not implemented yet so translation is not possible"
+        );
 
-    Ok(tok)
+        let mut tok = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
+        let special_tokens: Vec<_> = IntoIterator::into_iter([
+            "<|startoftranscript|>",
+            "<|translate|>",
+            "<|transcribe|>",
+            "<|startoflm|>",
+            "<|startofprev|>",
+            "<|nospeech|>",
+            "<|notimestamps|>",
+            "<|endoftranscript|>",
+        ])
+        .map(|s| s.to_owned())
+        .chain(LANGUAGES.keys().map(|t| format!("<|{t}|>")))
+        .map(|t| tokenizers::AddedToken::from(t, true))
+        .collect();
+
+        // let bpe_builder = tokenizers::models::bpe::BPE::from_file("gpt2/vocab.json", "gpt2/merges.txt");
+        // let bpe = bpe_builder.unk_token("<|endoftext|>".to_owned()).build().unwrap();
+        // let mut tok = Tokenizer::new(bpe);
+
+        tok.add_special_tokens(&special_tokens[..]);
+
+        Ok(Tokenizer {
+            token_id_sot: tok.token_to_id("<|startoftranscript|>").unwrap(),
+            token_id_eot: tok.token_to_id("<|endoftranscript|>").unwrap(),
+            token_id_transcribe: tok.token_to_id("<|transcribe|>").unwrap(),
+            token_id_translate: tok.token_to_id("<|translate|>").unwrap(),
+            token_id_notimestamps: tok.token_to_id("<|notimestamps|>").unwrap(),
+            token_id_nospeech: tok.token_to_id("<|nospeech|>").unwrap(),
+            token_id_startofprev: tok.token_to_id("<|startofprev|>").unwrap(),
+            token_id_startoflm: tok.token_to_id("<|startoflm|>").unwrap(),
+            tokenizer: tok,
+        })
+    }
+
+    pub fn sequence_sot(&self) -> Vec<u32> {
+        // TODO: add sot sequence for translation
+        vec![self.token_id_sot, self.token_id_transcribe]
+    }
+
+    pub fn decode(&self, tokens: &Tensor) -> anyhow::Result<String> {
+        let token_ids = tokens.iter::<i64>()?.map(|id| id as u32).collect();
+        Ok(self.tokenizer.decode(token_ids, false).unwrap())
+    }
 }

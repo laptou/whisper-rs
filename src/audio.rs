@@ -196,6 +196,46 @@ pub fn mel_filter() -> Tensor {
     Tensor::of_slice2(&ret[..])
 }
 
+// def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
+//     """
+//     Pad or trim the audio array to N_SAMPLES, as expected by the encoder.
+//     """
+//     if torch.is_tensor(array):
+//         if array.shape[axis] > length:
+//             array = array.index_select(dim=axis, index=torch.arange(length, device=array.device))
+
+//         if array.shape[axis] < length:
+//             pad_widths = [(0, 0)] * array.ndim
+//             pad_widths[axis] = (0, length - array.shape[axis])
+//             array = F.pad(array, [pad for sizes in pad_widths[::-1] for pad in sizes])
+//     else:
+//         if array.shape[axis] > length:
+//             array = array.take(indices=range(length), axis=axis)
+
+//         if array.shape[axis] < length:
+//             pad_widths = [(0, 0)] * array.ndim
+//             pad_widths[axis] = (0, length - array.shape[axis])
+//             array = np.pad(array, pad_widths)
+
+//     return array
+
+pub fn pad_or_trim(audio: &Tensor) -> Tensor {
+    let shape = audio.size();
+    let ndim = shape.len();
+    let len = *shape.last().unwrap();
+
+    if len > N_SAMPLES {
+        audio.slice(-1, None, N_SAMPLES, 1)
+    } else {
+        // padding is series of start, end pairs
+        let mut pad_widths = vec![0; ndim * 2];
+        // want to change only the end of the last dimension
+        pad_widths[ndim * 2 - 1] = N_SAMPLES - len;
+
+        audio.pad(&pad_widths[..], "constant", None)
+    }
+}
+
 pub fn log_mel_spectrogram(audio: &Tensor, mel_filter: &Tensor) -> Tensor {
     let dev = audio.device();
 
