@@ -53,5 +53,5 @@ pub fn main() {
 
     println!("audio shape = {:?}", mel_audio.size());
 
-    dt.run(mel_audio).unwrap();
+    tch::no_grad(move || dt.run(mel_audio).unwrap());
 }

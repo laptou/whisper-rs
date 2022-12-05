@@ -444,7 +444,6 @@ impl<'a> DecodeTask<'a> {
                 println!("d {:?}", tokens.size());
 
                 if *tokens.size().last().unwrap() as usize > self.initial_tokens.len() {
-
                     // only need to use the last token except in the first forward pass
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
@@ -519,13 +518,13 @@ impl<'a> DecodeTask<'a> {
 
                 (0..s.size()[0])
                     .map(|j| {
-                        let t = tokens.i(j);
+                        let t = s.i(j);
                         let end = t
                             .eq(self.tokenizer.token_id_eot as i64)
                             .nonzero()
                             .int64_value(&[0, 0]);
 
-                        t.i((self.initial_tokens.len() as i64, end))
+                        t.i(self.initial_tokens.len() as i64..end)
                     })
                     .collect()
             })
@@ -540,11 +539,19 @@ impl<'a> DecodeTask<'a> {
             .collect();
         let texts: Vec<_> = tokens.iter().map(|t| self.tokenizer.decode(t)).collect();
 
-        let sum_logprobs = selected.iter().map(|i| f64::from(sum_logprobs.i(*i)));
+        let sum_logprobs = selected
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(idx, selection)| f64::from(sum_logprobs.i((idx as i64, selection))));
         let avg_logprobs: Vec<_> = sum_logprobs
             .zip(&tokens)
             .map(|(lp, t)| lp / (t.size()[0] as f64 + 1.))
             .collect();
+
+        println!("tokens = {tokens:?}");
+        println!("texts = {texts:?}");
+        println!("avg_logprobs = {avg_logprobs:?}");
 
         todo!()
 
