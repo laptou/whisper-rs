@@ -452,19 +452,19 @@ impl<'a> DecodeTask<'a> {
             let logits = {
                 let mut tokens = tokens.i(..);
 
-                println!("d {tokens}");
+                // println!("d {tokens}");
 
                 if *tokens.size().last().unwrap() as usize > self.initial_tokens.len() {
                     // only need to use the last token except in the first forward pass
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
 
-                println!("e {tokens}");
+                // println!("e {tokens}");
 
                 self.model.decoder.forward_ext(&tokens, &audio_features, i)
             };
 
-            println!("f {logits}");
+            // println!("f {logits}");
 
             if i == 0 {
                 let probs_at_sot = logits.i((.., self.sot_idx as i64)).softmax(-1, dtype.0);
@@ -496,6 +496,10 @@ impl<'a> DecodeTask<'a> {
     }
 
     pub fn run(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
+        tch::no_grad(move || self.run_inner(mel))
+    }
+
+    fn run_inner(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
         let n_audio = mel.size()[0];
 
         let initial_tokens: Vec<_> = self.initial_tokens.iter().map(|t| *t as i64).collect();

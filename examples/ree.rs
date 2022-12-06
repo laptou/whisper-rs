@@ -55,5 +55,5 @@ pub fn main() {
     println!("mel_audio = {mel_audio}");
     let mel_audio = mel_audio.unsqueeze(0);
 
-    tch::no_grad(move || dt.run(mel_audio).unwrap());
+    dt.run(mel_audio).unwrap();
 }
