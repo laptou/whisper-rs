@@ -496,6 +496,9 @@ impl<'a> DecodeTask<'a> {
     }
 
     pub fn run(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
+        // without no_grad, pytorch will save the result of every operation for
+        // calculating gradients which will cause the program to run out of
+        // memory immediately
         tch::no_grad(move || self.run_inner(mel))
     }
 

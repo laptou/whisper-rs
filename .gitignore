@@ -1,1 +1,3 @@
 target/
+weights.npz
+weights.ot
