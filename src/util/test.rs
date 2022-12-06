@@ -3,8 +3,7 @@ use std::path::Path;
 use anyhow::Context;
 use tch::Tensor;
 
-pub fn read_csv_2d(path: impl AsRef<Path>) -> anyhow::Result<Tensor>
-{
+pub fn read_csv_2d(path: impl AsRef<Path>) -> anyhow::Result<Tensor> {
     let vals: Result<Vec<Vec<_>>, _> = csv::ReaderBuilder::new()
         .has_headers(false)
         .from_path(path)

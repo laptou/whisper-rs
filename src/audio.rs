@@ -6,7 +6,7 @@ use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
     meta::MetadataOptions, probe::Hint,
 };
-use tch::{IndexOp, Kind, Tensor};
+use tch::{Kind, Tensor};
 
 // hard-coded audio hyperparameters
 pub const SAMPLE_RATE: i64 = 16000;
@@ -269,7 +269,6 @@ pub fn log_mel_spectrogram(audio: &Tensor, mel_filter: &Tensor) -> Tensor {
 
 #[cfg(test)]
 mod test {
-    use tch::IndexOp;
 
     use crate::util::test::read_csv_2d;
 

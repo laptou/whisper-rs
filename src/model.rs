@@ -5,7 +5,7 @@ use tch::{
     Device, IndexOp, Kind, NewAxis, Tensor,
 };
 
-use crate::{audio::N_MELS, util::tensor_dbg};
+use crate::audio::N_MELS;
 
 #[derive(Debug)]
 pub struct LayerNorm(nn::LayerNorm);

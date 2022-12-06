@@ -1,5 +1,5 @@
 pub mod audio;
-pub mod util;
+pub mod decode;
 pub mod model;
 pub mod tokenize;
-pub mod decode;
+pub mod util;

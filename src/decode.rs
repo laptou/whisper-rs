@@ -126,7 +126,7 @@ impl TokenExtractor for GreedyTokenExtractor {
         logits: Tensor,
         sum_logprobs: &mut Tensor,
     ) -> (Tensor, bool) {
-        let next_tokens = if self.temperature == 0.0 {
+        let mut next_tokens = if self.temperature == 0.0 {
             logits.argmax(Some(-1), false)
         } else {
             unimplemented!()
@@ -143,16 +143,19 @@ impl TokenExtractor for GreedyTokenExtractor {
         let last_tokens_eot = last_tokens.eq(self.token_id_eot as i64);
         *sum_logprobs += current_logprobs * last_tokens_eot.logical_not();
 
-        next_tokens
-            .i(&last_tokens_eot)
-            .fill_(self.token_id_eot as i64);
+        let _ = next_tokens.index_put_(
+            &[Some(last_tokens_eot)],
+            &Tensor::from(self.token_id_eot as i64),
+            false,
+        );
+
         let tokens = Tensor::cat(&[&tokens, &next_tokens.i((.., NewAxis))], -1);
         let completed = tokens.eq(self.token_id_eot as i64).all().into();
 
         (tokens, completed)
     }
 
-    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor) {
+    fn finalize(&mut self, _tokens: Tensor, _sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor) {
         // (
         //     // make sure each sequence has at least one EOT token at the end
         //     tokens.pad(&[0, 1], "constant", self.token_id_eot as f64),
@@ -184,7 +187,7 @@ impl TokenExtractor for BeamSearchTokenExtractor {
         &mut self,
         tokens: Tensor,
         logits: Tensor,
-        mut sum_logprobs: &mut Tensor,
+        sum_logprobs: &mut Tensor,
     ) -> (Tensor, bool) {
         debug_assert_eq!(tokens.size()[0] % (self.beam_size as i64), 0);
 
@@ -241,7 +244,7 @@ impl TokenExtractor for BeamSearchTokenExtractor {
                 if sequence.last() == Some(&(self.token_id_eot as i64)) {
                     finished.insert(sequence, score);
                 } else {
-                    sum_logprobs.index_put_(
+                    let _ = sum_logprobs.index_put_(
                         &[Some(Tensor::from(next_tokens.len() as i64))],
                         &Tensor::from(score as f32),
                         false,
@@ -412,7 +415,7 @@ impl<'a> DecodeTask<'a> {
             options,
 
             token_extractor: match options.token_extract_mode {
-                TokenExtractMode::Greedy(n) => todo!(),
+                TokenExtractMode::Greedy(_n) => todo!(),
                 TokenExtractMode::BeamSearch {
                     beam_size,
                     patience,

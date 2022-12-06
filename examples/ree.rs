@@ -1,5 +1,5 @@
-use tch::{nn::VarStore, Device, Kind, Tensor};
-use tokenizers::Tokenizer;
+use tch::{nn::VarStore, Device};
+
 use whisper::{
     self,
     decode::{DecodeOptions, DecodeTask},
