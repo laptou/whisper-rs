@@ -138,20 +138,23 @@ impl Tokenizer {
         );
 
         let mut tok = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
-        let special_tokens: Vec<_> = IntoIterator::into_iter([
-            "<|startoftranscript|>",
-            "<|translate|>",
-            "<|transcribe|>",
-            "<|startoflm|>",
-            "<|startofprev|>",
-            "<|nospeech|>",
-            "<|notimestamps|>",
-            "<|endoftranscript|>",
-        ])
-        .map(|s| s.to_owned())
-        .chain(LANGUAGES.keys().map(|t| format!("<|{t}|>")))
-        .map(|t| tokenizers::AddedToken::from(t, true))
-        .collect();
+        let special_tokens: Vec<_> = ["<|startoftranscript|>"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .chain(LANGUAGES.keys().map(|t| format!("<|{t}|>")))
+            .chain(
+                [
+                    "<|translate|>",
+                    "<|transcribe|>",
+                    "<|startoflm|>",
+                    "<|startofprev|>",
+                    "<|nospeech|>",
+                    "<|notimestamps|>",
+                ]
+                .map(|s| s.to_owned()),
+            )
+            .map(|t| tokenizers::AddedToken::from(t, true))
+            .collect();
 
         // let bpe_builder = tokenizers::models::bpe::BPE::from_file("gpt2/vocab.json", "gpt2/merges.txt");
         // let bpe = bpe_builder.unk_token("<|endoftext|>".to_owned()).build().unwrap();
@@ -161,7 +164,7 @@ impl Tokenizer {
 
         Ok(Tokenizer {
             token_id_sot: tok.token_to_id("<|startoftranscript|>").unwrap(),
-            token_id_eot: tok.token_to_id("<|endoftranscript|>").unwrap(),
+            token_id_eot: tok.token_to_id("<|endoftext|>").unwrap(),
             token_id_transcribe: tok.token_to_id("<|transcribe|>").unwrap(),
             token_id_translate: tok.token_to_id("<|translate|>").unwrap(),
             token_id_notimestamps: tok.token_to_id("<|notimestamps|>").unwrap(),
@@ -174,7 +177,8 @@ impl Tokenizer {
 
     pub fn sequence_sot(&self) -> Vec<u32> {
         // TODO: add sot sequence for translation
-        vec![self.token_id_sot, self.token_id_transcribe]
+        // vec![self.token_id_sot, self.token_id_transcribe]
+        vec![self.token_id_sot]
     }
 
     pub fn decode(&self, tokens: &Tensor) -> anyhow::Result<String> {

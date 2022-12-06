@@ -7,6 +7,7 @@ use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
 use crate::{
     model::Whisper,
     tokenize::{Task, Tokenizer},
+    util::tensor_dbg,
 };
 
 #[derive(Debug)]
@@ -105,7 +106,7 @@ trait TokenExtractor: Debug {
     /// sum_logprobs : List[List[float]], length = n_audio
     ///     sequence of cumulative log probabilities corresponding to the above
     ///
-    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Tensor, Tensor);
+    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor);
 
     fn group_size(&self) -> usize;
 }
@@ -151,12 +152,14 @@ impl TokenExtractor for GreedyTokenExtractor {
         (tokens, completed)
     }
 
-    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Tensor, Tensor) {
-        (
-            // make sure each sequence has at least one EOT token at the end
-            tokens.pad(&[0, 1], "constant", self.token_id_eot as f64),
-            sum_logprobs,
-        )
+    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor) {
+        // (
+        //     // make sure each sequence has at least one EOT token at the end
+        //     tokens.pad(&[0, 1], "constant", self.token_id_eot as f64),
+        //     sum_logprobs,
+        // )
+
+        todo!()
     }
 
     fn group_size(&self) -> usize {
@@ -197,9 +200,13 @@ impl TokenExtractor for BeamSearchTokenExtractor {
         let mut source_indices = vec![];
         let mut finished_sequences = vec![];
 
+        // tensor_dbg!(tokens);
+        // tensor_dbg!(logits);
+        // tensor_dbg!(sum_logprobs);
+
         for i in 0..n_audio {
             // vec of tuple of (sequence, score, source)
-            let mut scores_sources = Vec::new();
+            let mut scores_sources = HashMap::new();
             let mut finished = HashMap::new();
 
             // STEP 1: calculate the cumulative log probabilities for possible
@@ -211,14 +218,16 @@ impl TokenExtractor for BeamSearchTokenExtractor {
                 let topk = logprobs
                     .i(idx)
                     .topk((self.beam_size + 1) as i64, -1, true, true);
-                let topk: (Vec<i64>, Vec<i64>) = (topk.0.into(), topk.1.into());
+                let topk: (Vec<f64>, Vec<i64>) = (topk.0.into(), topk.1.into());
+
+                // tensor_dbg!(prefix);
 
                 for (logprob, token) in topk.0.into_iter().zip(topk.1) {
                     let new_logprob: f64 = (sum_logprobs.i(idx) + logprob).into();
                     let mut sequence = Vec::<i64>::from(&prefix);
                     sequence.push(token);
 
-                    scores_sources.push((sequence, new_logprob, idx));
+                    scores_sources.insert(sequence, (new_logprob, idx));
                 }
             }
 
@@ -226,8 +235,9 @@ impl TokenExtractor for BeamSearchTokenExtractor {
             // for each audio
             let mut saved = 0;
             // sort by score
-            scores_sources.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            for (sequence, score, source) in scores_sources {
+            let mut scores_sources: Vec<_> = scores_sources.into_iter().collect();
+            scores_sources.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+            for (sequence, (score, source)) in scores_sources {
                 if sequence.last() == Some(&(self.token_id_eot as i64)) {
                     finished.insert(sequence, score);
                 } else {
@@ -284,7 +294,7 @@ impl TokenExtractor for BeamSearchTokenExtractor {
         (tokens, completed)
     }
 
-    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Tensor, Tensor) {
+    fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor) {
         // collect all finished sequences, including patience, and add unfinished ones if not enough
 
         for (i, seqs) in self
@@ -312,17 +322,18 @@ impl TokenExtractor for BeamSearchTokenExtractor {
             }
         }
 
-        let tokens: Vec<Tensor> = self
+        let tokens: Vec<_> = self
             .finished_sequences
             .as_ref()
             .unwrap()
             .iter()
             .map(|seqs| {
                 let tmp: Vec<Tensor> = seqs.keys().map(|seq| Tensor::of_slice(seq)).collect();
-                Tensor::stack(&tmp[..], 0)
+                // Tensor::stack(&tmp[..], 0)
+                tmp
             })
             .collect();
-        let tokens = Tensor::stack(&tokens[..], 0);
+        // let tokens = Tensor::stack(&tokens[..], 0);
 
         let sum_logprobs: Vec<Tensor> = self
             .finished_sequences
@@ -441,25 +452,30 @@ impl<'a> DecodeTask<'a> {
             let logits = {
                 let mut tokens = tokens.i(..);
 
-                println!("d {:?}", tokens.size());
+                println!("d {tokens}");
 
                 if *tokens.size().last().unwrap() as usize > self.initial_tokens.len() {
                     // only need to use the last token except in the first forward pass
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
-                println!("e {:?}", tokens.size());
 
-                self.model.decoder.forward_ext(&tokens, &audio_features)
+                println!("e {tokens}");
+
+                self.model.decoder.forward_ext(&tokens, &audio_features, i)
             };
+
+            println!("f {logits}");
 
             if i == 0 {
                 let probs_at_sot = logits.i((.., self.sot_idx as i64)).softmax(-1, dtype.0);
+                // tensor_dbg!(probs_at_sot);
                 probs_at_sot
                     .i((.., self.tokenizer.token_id_nospeech as i64))
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
             }
 
             let logits = logits.i((.., -1));
+            // tensor_dbg!(logits);
             let logits = self
                 .logit_filters
                 .iter()
@@ -470,6 +486,7 @@ impl<'a> DecodeTask<'a> {
                     .update(tokens, logits, &mut sum_logprobs);
             tokens = new_tokens;
 
+            // tensor_dbg!(tokens);
             if completed || *tokens.size().last().unwrap() > self.model.dims.n_text_ctxs {
                 break;
             }
@@ -482,22 +499,35 @@ impl<'a> DecodeTask<'a> {
         let n_audio = mel.size()[0];
 
         let initial_tokens: Vec<_> = self.initial_tokens.iter().map(|t| *t as i64).collect();
+        // dbg!(&initial_tokens);
 
         let audio_features = self.model.encoder.forward(&mel);
         let repeated_tokens = Tensor::of_slice(&initial_tokens[..]).repeat(&[n_audio, 1]);
+
+        // tensor_dbg!(&audio_features);
+        // tensor_dbg!(&repeated_tokens);
 
         let n_group = match self.options.token_extract_mode {
             TokenExtractMode::Greedy(n) => n,
             TokenExtractMode::BeamSearch { beam_size, .. } => beam_size,
         } as i64;
 
+        // dbg!(&n_group);
+
         // repeat the audio & text tensors by the group size, for beam search or best-of-n sampling
         let audio_features = audio_features.repeat_interleave_self_int(n_group, 0, None);
         let repeated_tokens = repeated_tokens.repeat_interleave_self_int(n_group, 0, None);
 
+        // tensor_dbg!(&audio_features);
+        // tensor_dbg!(&repeated_tokens);
+
         // call the main sampling loop
         let (tokens, sum_logprobs, no_speech_probs) =
             self.main_loop(&audio_features, repeated_tokens);
+
+        // tensor_dbg!(&tokens);
+        // dbg!(&sum_logprobs);
+        // dbg!(&no_speech_probs);
 
         // reshape the tensors to have (n_audio, n_group) as the first two dimensions
         let audio_features = audio_features.slice(0, None, None, n_group);
@@ -507,18 +537,22 @@ impl<'a> DecodeTask<'a> {
         debug_assert_eq!(audio_features.size()[0], n_audio);
         debug_assert_eq!(no_speech_probs.size()[0], n_audio);
 
+        // tensor_dbg!(&audio_features);
+        // tensor_dbg!(&no_speech_probs);
+
         let tokens = tokens.reshape(&[n_audio, n_group, -1]);
         let sum_logprobs = sum_logprobs.reshape(&[n_audio, n_group]);
 
+        // tensor_dbg!(&tokens);
+        // tensor_dbg!(&sum_logprobs);
+
         // get the final candidates for each group, and slice between the first sampled token and EOT
         let (tokens, sum_logprobs) = self.token_extractor.finalize(tokens, sum_logprobs);
-        let tokens: Vec<Vec<Tensor>> = (0..tokens.size()[0])
-            .map(|i| {
-                let s = tokens.i(i);
-
-                (0..s.size()[0])
-                    .map(|j| {
-                        let t = s.i(j);
+        let tokens: Vec<Vec<Tensor>> = tokens
+            .into_iter()
+            .map(|s| {
+                s.into_iter()
+                    .map(|t| {
                         let end = t
                             .eq(self.tokenizer.token_id_eot as i64)
                             .nonzero()
@@ -530,6 +564,9 @@ impl<'a> DecodeTask<'a> {
             })
             .collect();
 
+        dbg!(&tokens);
+        tensor_dbg!(&sum_logprobs);
+
         // select the top-ranked sample in each group
         let selected = self.sequence_ranker.rank(&tokens, &sum_logprobs);
         let tokens: Vec<_> = tokens
@@ -538,6 +575,10 @@ impl<'a> DecodeTask<'a> {
             .map(|(mut t, i)| t.remove(*i as usize))
             .collect();
         let texts: Vec<_> = tokens.iter().map(|t| self.tokenizer.decode(t)).collect();
+
+        dbg!(&selected);
+        dbg!(&tokens);
+        dbg!(&texts);
 
         let sum_logprobs = selected
             .iter()

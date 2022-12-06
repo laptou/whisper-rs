@@ -219,18 +219,18 @@ pub fn mel_filter() -> Tensor {
 
 //     return array
 
-pub fn pad_or_trim(audio: &Tensor) -> Tensor {
+pub fn pad_or_trim(audio: &Tensor, len: i64) -> Tensor {
     let shape = audio.size();
     let ndim = shape.len();
-    let len = *shape.last().unwrap();
+    let audio_len = *shape.last().unwrap();
 
-    if len > N_SAMPLES {
-        audio.slice(-1, None, N_SAMPLES, 1)
+    if audio_len > len {
+        audio.slice(-1, None, len, 1)
     } else {
-        // padding is series of start, end pairs
+        // padding is series of start, end pairs going from last dim to first
         let mut pad_widths = vec![0; ndim * 2];
         // want to change only the end of the last dimension
-        pad_widths[ndim * 2 - 1] = N_SAMPLES - len;
+        pad_widths[1] = len - audio_len;
 
         audio.pad(&pad_widths[..], "constant", None)
     }
@@ -253,19 +253,11 @@ pub fn log_mel_spectrogram(audio: &Tensor, mel_filter: &Tensor) -> Tensor {
         true,
         true,
     );
-    println!(
-        "stft size = {:?}, window size = {:?}, audio size = {:?}",
-        stft.size(),
-        window.size(),
-        audio.size()
-    );
-    let magnitudes = stft.slice(1, None, Some(-1), 1).abs().pow_tensor_scalar(2);
-    println!("magnitudes size = {:?}", magnitudes.size());
+    let magnitudes = stft.slice(1, None, -1, 1).abs().pow_tensor_scalar(2);
 
     let mel_filter = mel_filter.to_device(dev);
     // calculate mel spectrogram by multiplying mel filter w/ magnitudes at
     // given frequencies
-    println!("mel_filter size = {:?}", mel_filter.size());
     let mel_spec = mel_filter.matmul(&magnitudes);
     // remove zeros to avoid nan, then take log
     let log_spec = mel_spec.clamp_min(1e-10).log10();

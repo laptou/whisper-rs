@@ -8,6 +8,7 @@ use whisper::{
 
 pub fn main() {
     // let tensors = tch::Tensor::read_npz("oof.npz").unwrap();
+    // dbg!(tensors);
     // Tensor::save_multi(&tensors[..], "oof.ot").unwrap();
 
     let mut vars = VarStore::new(Device::cuda_if_available());
@@ -44,14 +45,15 @@ pub fn main() {
     .unwrap();
 
     let audio = whisper::audio::load_audio("test/data/jfk_resampled.wav").unwrap();
-    let audio = whisper::audio::pad_or_trim(&audio);
+    println!("audio = {audio}");
 
     let mel_filter = whisper::audio::mel_filter();
 
     let mel_audio = whisper::audio::log_mel_spectrogram(&audio, &mel_filter);
+    println!("mel_audio = {mel_audio}");
+    let mel_audio = whisper::audio::pad_or_trim(&mel_audio, whisper::audio::N_FRAMES);
+    println!("mel_audio = {mel_audio}");
     let mel_audio = mel_audio.unsqueeze(0);
-
-    println!("audio shape = {:?}", mel_audio.size());
 
     tch::no_grad(move || dt.run(mel_audio).unwrap());
 }

@@ -1,9 +1,11 @@
+use std::cell::Cell;
+
 use tch::{
     nn::{self, Module},
     Device, IndexOp, Kind, NewAxis, Tensor,
 };
 
-use crate::audio::N_MELS;
+use crate::{audio::N_MELS, util::tensor_dbg};
 
 #[derive(Debug)]
 pub struct LayerNorm(nn::LayerNorm);
@@ -31,6 +33,44 @@ impl nn::Module for Linear {
     }
 }
 
+/// This implements the kv_cache function from whisper src
+pub struct Cached<T: nn::Module> {
+    inner: T,
+    cache: Cell<Option<Tensor>>,
+}
+
+impl<T: nn::Module> Cached<T> {
+    pub fn new(inner: T) -> Self {
+        Self {
+            inner,
+            cache: Cell::new(None),
+        }
+    }
+}
+
+impl<T: nn::Module> std::fmt::Debug for Cached<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cached")
+            .field("inner", &self.inner)
+            .finish()
+    }
+}
+
+impl<T: nn::Module> nn::Module for Cached<T> {
+    fn forward(&self, xs: &tch::Tensor) -> tch::Tensor {
+        let output = self.inner.forward(xs);
+
+        let output = match self.cache.take() {
+            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1).detach(),
+            // save as-is, for the first token or cross attention
+            _ => output,
+        };
+
+        self.cache.set(Some(output.i(..)));
+        output
+    }
+}
+
 pub fn default_dtype() -> (Kind, Device) {
     (Kind::Float, Device::cuda_if_available())
 }
@@ -52,8 +92,8 @@ pub fn sinsoids(length: i64, channels: i64, max_timescale: Option<f32>) -> Tenso
 pub struct MultiHeadAttention {
     pub n_heads: i64,
     pub query: nn::Linear,
-    pub key: nn::Linear,
-    pub value: nn::Linear,
+    pub key: Cached<nn::Linear>,
+    pub value: Cached<nn::Linear>,
     pub out: nn::Linear,
 }
 
@@ -67,7 +107,7 @@ impl MultiHeadAttention {
                 n_states,
                 nn::LinearConfig::default(),
             ),
-            key: nn::linear(
+            key: Cached::new(nn::linear(
                 &vs / "key",
                 n_states,
                 n_states,
@@ -75,13 +115,13 @@ impl MultiHeadAttention {
                     bias: false,
                     ..Default::default()
                 },
-            ),
-            value: nn::linear(
+            )),
+            value: Cached::new(nn::linear(
                 &vs / "value",
                 n_states,
                 n_states,
                 nn::LinearConfig::default(),
-            ),
+            )),
             out: nn::linear(&vs / "out", n_states, n_states, nn::LinearConfig::default()),
         }
     }
@@ -90,6 +130,10 @@ impl MultiHeadAttention {
         let q = self.query.forward(&xs);
         let k = self.key.forward(xa.unwrap_or(&xs));
         let v = self.value.forward(xa.unwrap_or(&xs));
+
+        // tensor_dbg!(q);
+        // tensor_dbg!(k);
+        // tensor_dbg!(v);
 
         let (_n_batch, n_ctx, n_state) = q.size3().unwrap();
         let scale = f64::powf((n_state / self.n_heads) as f64, -0.25);
@@ -110,13 +154,23 @@ impl MultiHeadAttention {
             .view([v_size.0, v_size.1, self.n_heads, -1])
             .permute(&[0, 2, 1, 3]);
 
+        // tensor_dbg!(q);
+        // tensor_dbg!(k);
+        // tensor_dbg!(v);
+
         let mut qk = q.matmul(&k);
+        // tensor_dbg!(qk);
+
         if let Some(mask) = mask {
             qk += mask.i((..n_ctx, ..n_ctx));
         }
 
+        // tensor_dbg!(qk);
+
         let w = qk.softmax(-1, q.kind());
         let wv = w.matmul(&v).permute(&[0, 2, 1, 3]).flatten(2, -1);
+
+        // tensor_dbg!(wv);
 
         self.out.forward(&wv)
     }
@@ -203,11 +257,17 @@ impl ResidualAttentionBlock {
                 .attn
                 .forward_ext(&self.attn_ln.forward(&xs), None, mask);
 
+        // tensor_dbg!(x);
+
         if let (Some(cross_attn), Some(cross_attn_ln)) = (&self.cross_attn, &self.cross_attn_ln) {
             x += cross_attn.forward_ext(&cross_attn_ln.forward(&x), xa, None);
         }
 
+        // tensor_dbg!(x);
+
         x += self.mlp.forward(&self.mlp_ln.forward(&x));
+
+        // tensor_dbg!(x);
         x
     }
 }
@@ -277,6 +337,8 @@ impl Module for AudioEncoder {
         let xs = self.conv1.forward(xs).gelu("none");
         let xs = self.conv2.forward(&xs).gelu("none").permute(&[0, 2, 1]);
 
+        // // tensor_dbg!(xs);
+
         debug_assert_eq!(
             &xs.size()[1..],
             &self.position_emb.size()[..],
@@ -285,9 +347,11 @@ impl Module for AudioEncoder {
         let mut xs = xs + &self.position_emb;
 
         for block in &self.blocks {
+            // // tensor_dbg!(xs);
             xs = block.forward(&xs);
         }
 
+        // // tensor_dbg!(xs);
         self.ln_post.forward(&xs)
     }
 }
@@ -317,7 +381,11 @@ impl TextDecoder {
                 n_states,
                 nn::EmbeddingConfig::default(),
             ),
-            position_emb: Tensor::empty(&[n_ctxs, n_states], default_dtype()),
+            position_emb: vs.var(
+                "positional_embedding",
+                &[n_ctxs, n_states],
+                nn::Init::Const(0.0),
+            ),
             mask: Tensor::empty(&[n_ctxs, n_ctxs], default_dtype())
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
@@ -332,7 +400,7 @@ impl TextDecoder {
     ///     the text tokens
     /// xa: shape = (batch_size, n_mels, n_audio_ctx)
     ///     the encoded audio features to be attended onxs: shape = (batch_size, n_mels, n_ctx)
-    pub fn forward_ext(&self, xs: &Tensor, xa: &Tensor) -> Tensor {
+    pub fn forward_ext(&self, xs: &Tensor, xa: &Tensor, offset: i64) -> Tensor {
         // offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
         // x = self.token_embedding(x) + self.positional_embedding[offset : offset + x.shape[-1]]
         // x = x.to(xa.dtype)
@@ -345,18 +413,24 @@ impl TextDecoder {
 
         // return logits
 
-        let offset = 0;
         let mut x = self.token_emb.forward(xs)
             + self
                 .position_emb
                 .i(offset..offset + *xs.size().last().unwrap());
 
+        // tensor_dbg!(self.position_emb);
+        // tensor_dbg!(x);
+        // tensor_dbg!(xa);
+
         for block in &self.blocks {
+            // tensor_dbg!(x);
             x = block.forward_ext(&x, Some(xa), Some(&self.mask));
         }
 
+        // tensor_dbg!(x);
         x = self.ln_pre.forward(&x);
 
+        // tensor_dbg!(x);
         x.matmul(&self.token_emb.ws.transpose(0, 1))
     }
 }
@@ -404,6 +478,7 @@ impl Whisper {
     }
 
     pub fn forward_ext(&self, mel: &Tensor, tokens: &Tensor) -> Tensor {
-        self.decoder.forward_ext(tokens, &self.encoder.forward(mel))
+        self.decoder
+            .forward_ext(tokens, &self.encoder.forward(mel), 0)
     }
 }
