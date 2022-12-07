@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::fmt::Debug;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Context;
 use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
@@ -53,7 +53,7 @@ pub struct DecodingResult {
 }
 
 trait LogitFilter: Debug {
-    fn apply(&self, logits: &Tensor, tokens: &Tensor) -> Tensor;
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor);
 }
 
 /// This is called `TokenDecoder` in original Whisper source. Is used to
@@ -404,6 +404,149 @@ impl SequenceRanker for MaximumLikelihoodRanker {
     }
 }
 
+#[derive(Debug)]
+struct SuppressBlank {
+    suppress_indices: Tensor,
+    sample_begin: i64,
+}
+
+impl SuppressBlank {
+    fn new(tokenizer: &Tokenizer, sample_begin: i64) -> Self {
+        let token_id_space = tokenizer
+            .encode(" ", true)
+            .unwrap()
+            .get_ids()
+            .first()
+            .copied()
+            .unwrap();
+        let token_id_eot = tokenizer.token_id_eot;
+
+        Self {
+            suppress_indices: Tensor::of_slice(&[token_id_space as i64, token_id_eot as i64]),
+            sample_begin,
+        }
+    }
+}
+
+impl LogitFilter for SuppressBlank {
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
+        if tokens.size()[1] == self.sample_begin {
+            logits.index_fill_(1, &self.suppress_indices, f64::NEG_INFINITY);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SuppressTokens {
+    suppress_indices: Tensor,
+}
+
+impl SuppressTokens {
+    fn new(token_ids: &[u32]) -> Self {
+        let token_ids: Vec<_> = token_ids.into_iter().map(|i| *i as i64).collect();
+
+        Self {
+            suppress_indices: Tensor::of_slice(&token_ids[..]),
+        }
+    }
+}
+
+impl LogitFilter for SuppressTokens {
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
+        logits.index_fill_(1, &self.suppress_indices, f64::NEG_INFINITY);
+    }
+}
+
+#[derive(Debug)]
+struct TimestampTokens {
+    max_initial_timestamp_index: Option<i64>,
+    sample_begin: i64,
+    tokenizer: Arc<Tokenizer>,
+}
+
+impl TimestampTokens {
+    fn new(
+        tokenizer: Arc<Tokenizer>,
+        sample_begin: i64,
+        max_initial_timestamp_index: Option<i64>,
+    ) -> Self {
+        Self {
+            tokenizer,
+            sample_begin,
+            max_initial_timestamp_index,
+        }
+    }
+}
+
+impl LogitFilter for TimestampTokens {
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
+        logits.index_fill_(
+            1,
+            &Tensor::from(self.tokenizer.token_id_notimestamps as i64),
+            f64::NEG_INFINITY,
+        );
+
+        let token_id_timestampbegin = self.tokenizer.token_id_timestampbegin as i64;
+
+        // timestamps have to appear in pairs, except directly before EOT; mask
+        // logits accordingly
+        for k in 0..tokens.size()[0] {
+            let seq: Vec<i64> = tokens.i((k, self.sample_begin..)).into();
+            let last_was_timestamp = match seq.last() {
+                Some(&last) => last >= token_id_timestampbegin,
+                None => false,
+            };
+            let second_last_was_timestamp =
+                seq.len() < 2 || seq[seq.len() - 2] >= token_id_timestampbegin;
+
+            if last_was_timestamp {
+                if second_last_was_timestamp {
+                    // has to be non-timestamp
+                    logits
+                        .i((k, token_id_timestampbegin..))
+                        .fill_(f64::NEG_INFINITY);
+                } else {
+                    // cannot be normal text tokens
+                    logits
+                        .i((k, ..self.tokenizer.token_id_eot as i64))
+                        .fill_(f64::NEG_INFINITY);
+                }
+            }
+        }
+
+        if tokens.size()[1] == self.sample_begin {
+            // suppress generating non-timestamp tokens at the beginning
+            logits
+                .i((.., ..token_id_timestampbegin))
+                .fill_(f64::NEG_INFINITY);
+
+            if let Some(max_initial_timestamp_index) = self.max_initial_timestamp_index {
+                let last_allowed = token_id_timestampbegin + max_initial_timestamp_index;
+                logits.i((.., last_allowed + 1..)).fill_(f64::NEG_INFINITY);
+            }
+        }
+
+        // if sum of probability over timestamps is above any other token,
+        // sample timestamp
+
+        let logprobs = logits.log_softmax(-1, Kind::Float);
+        for k in 0..tokens.size()[0] {
+            let timestamp_logprob: f64 = logprobs
+                .i((k, token_id_timestampbegin..))
+                .logsumexp(&[-1], false)
+                .into();
+            let max_text_token_logprob: f64 =
+                logprobs.i((k, ..token_id_timestampbegin)).max().into();
+
+            if timestamp_logprob > max_text_token_logprob {
+                logits
+                    .i((k, ..token_id_timestampbegin))
+                    .fill_(f64::NEG_INFINITY);
+            }
+        }
+    }
+}
+
 impl<'a> DecodeTask<'a> {
     pub fn new(model: &'a Whisper, options: DecodeOptions) -> anyhow::Result<Self> {
         let sample_len = options
@@ -479,11 +622,11 @@ impl<'a> DecodeTask<'a> {
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
             }
 
-            let logits = logits.i((.., -1));
-            let logits = self
-                .logit_filters
-                .iter()
-                .fold(logits, |logits, filter| filter.apply(&logits, &tokens));
+            let mut logits = logits.i((.., -1));
+
+            for filter in &self.logit_filters {
+                filter.apply(&mut logits, &tokens);
+            }
 
             let (new_tokens, completed) =
                 self.token_extractor

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use once_cell::sync::Lazy;
 use tch::Tensor;
@@ -119,6 +119,7 @@ pub struct Tokenizer {
     pub token_id_nospeech: u32,
     pub token_id_startofprev: u32,
     pub token_id_startoflm: u32,
+    pub token_id_timestampbegin: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -137,7 +138,7 @@ impl Tokenizer {
             "multilingual tokenizer is not implemented yet so translation is not possible"
         );
 
-        let mut tok = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
+        let mut tokenizer = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
         let special_tokens: Vec<_> = ["<|startoftranscript|>"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -160,18 +161,24 @@ impl Tokenizer {
         // let bpe = bpe_builder.unk_token("<|endoftext|>".to_owned()).build().unwrap();
         // let mut tok = Tokenizer::new(bpe);
 
-        tok.add_special_tokens(&special_tokens[..]);
+        tokenizer.add_special_tokens(&special_tokens[..]);
+
+        let special_token_ids: Vec<_> = special_tokens
+            .iter()
+            .map(|tok| tokenizer.token_to_id(&tok.content).unwrap())
+            .collect();
 
         Ok(Tokenizer {
-            token_id_sot: tok.token_to_id("<|startoftranscript|>").unwrap(),
-            token_id_eot: tok.token_to_id("<|endoftext|>").unwrap(),
-            token_id_transcribe: tok.token_to_id("<|transcribe|>").unwrap(),
-            token_id_translate: tok.token_to_id("<|translate|>").unwrap(),
-            token_id_notimestamps: tok.token_to_id("<|notimestamps|>").unwrap(),
-            token_id_nospeech: tok.token_to_id("<|nospeech|>").unwrap(),
-            token_id_startofprev: tok.token_to_id("<|startofprev|>").unwrap(),
-            token_id_startoflm: tok.token_to_id("<|startoflm|>").unwrap(),
-            tokenizer: tok,
+            token_id_sot: tokenizer.token_to_id("<|startoftranscript|>").unwrap(),
+            token_id_eot: tokenizer.token_to_id("<|endoftext|>").unwrap(),
+            token_id_transcribe: tokenizer.token_to_id("<|transcribe|>").unwrap(),
+            token_id_translate: tokenizer.token_to_id("<|translate|>").unwrap(),
+            token_id_notimestamps: tokenizer.token_to_id("<|notimestamps|>").unwrap(),
+            token_id_nospeech: tokenizer.token_to_id("<|nospeech|>").unwrap(),
+            token_id_startofprev: tokenizer.token_to_id("<|startofprev|>").unwrap(),
+            token_id_startoflm: tokenizer.token_to_id("<|startoflm|>").unwrap(),
+            token_id_timestampbegin: *special_token_ids.last().unwrap() + 1,
+            tokenizer,
         })
     }
 
@@ -184,5 +191,13 @@ impl Tokenizer {
     pub fn decode(&self, tokens: &Tensor) -> anyhow::Result<String> {
         let token_ids = tokens.iter::<i64>()?.map(|id| id as u32).collect();
         Ok(self.tokenizer.decode(token_ids, false).unwrap())
+    }
+}
+
+impl Deref for Tokenizer {
+    type Target = tokenizers::Tokenizer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tokenizer
     }
 }
