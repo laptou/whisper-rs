@@ -444,6 +444,9 @@ impl<'a> DecodeTask<'a> {
         audio_features: &Tensor,
         mut tokens: Tensor,
     ) -> (Tensor, Tensor, Vec<f32>) {
+
+        dbg!(tokens.device());
+
         let n_batch = tokens.size()[0];
         debug_assert_eq!(audio_features.size()[0], n_batch);
 
@@ -487,7 +490,7 @@ impl<'a> DecodeTask<'a> {
             let (new_tokens, completed) =
                 self.token_extractor
                     .update(tokens, logits, &mut sum_logprobs);
-            tokens = new_tokens;
+            tokens = new_tokens.to_device(Device::cuda_if_available());
 
             // tensor_dbg!(tokens);
             if completed || *tokens.size().last().unwrap() > self.model.dims.n_text_ctxs {
@@ -512,7 +515,9 @@ impl<'a> DecodeTask<'a> {
         // dbg!(&initial_tokens);
 
         let audio_features = self.model.encoder.forward(&mel);
-        let repeated_tokens = Tensor::of_slice(&initial_tokens[..]).repeat(&[n_audio, 1]);
+        let repeated_tokens = Tensor::of_slice(&initial_tokens[..])
+            .repeat(&[n_audio, 1])
+            .to_device(Device::cuda_if_available());
 
         // tensor_dbg!(&audio_features);
         // tensor_dbg!(&repeated_tokens);
@@ -604,7 +609,7 @@ impl<'a> DecodeTask<'a> {
         println!("texts = {texts:?}");
         println!("avg_logprobs = {avg_logprobs:?}");
 
-        todo!()
+        Ok(vec![])
 
         // fields = (texts, languages, tokens, audio_features, avg_logprobs, no_speech_probs)
         // if len(set(map(len, fields))) != 1:

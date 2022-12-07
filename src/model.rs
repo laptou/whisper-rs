@@ -15,6 +15,7 @@ impl nn::Module for LayerNorm {
         self.0
             .forward(&xs.to_dtype(tch::Kind::Float, false, false))
             .to_dtype(xs.kind(), false, false)
+            .to_device(Device::cuda_if_available())
     }
 }
 
@@ -30,6 +31,7 @@ impl nn::Module for Linear {
                 .as_ref()
                 .map(|bs| bs.to_dtype(xs.kind(), false, false)),
         )
+        .to_device(Device::cuda_if_available())
     }
 }
 
@@ -61,7 +63,9 @@ impl<T: nn::Module> nn::Module for Cached<T> {
         let output = self.inner.forward(xs);
 
         let output = match self.cache.take() {
-            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1).detach(),
+            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1)
+                .detach()
+                .to_device(Device::cuda_if_available()),
             // save as-is, for the first token or cross attention
             _ => output,
         };
@@ -77,7 +81,7 @@ pub fn default_dtype() -> (Kind, Device) {
 
 /// Returns sinusoids for positional embedding
 /// `max_timescale` defaults to 10000.
-pub fn sinsoids(length: i64, channels: i64, max_timescale: Option<f32>) -> Tensor {
+pub fn sinusoids(length: i64, channels: i64, max_timescale: Option<f32>) -> Tensor {
     debug_assert!(channels % 2 == 0, "number of channels must be even");
     let log_timescale_increment =
         f32::ln(max_timescale.unwrap_or(10000.0)) / (channels / 2 - 1) as f32;
@@ -320,7 +324,7 @@ impl AudioEncoder {
             blocks: (0..n_layers)
                 .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, false))
                 .collect(),
-            position_emb: sinsoids(n_ctxs, n_states, None),
+            position_emb: sinusoids(n_ctxs, n_states, None).to_device(Device::cuda_if_available()),
             ln_post: nn::layer_norm(
                 &vs / "ln_post",
                 vec![n_states],
@@ -381,11 +385,13 @@ impl TextDecoder {
                 n_states,
                 nn::EmbeddingConfig::default(),
             ),
-            position_emb: vs.var(
-                "positional_embedding",
-                &[n_ctxs, n_states],
-                nn::Init::Const(0.0),
-            ),
+            position_emb: vs
+                .var(
+                    "positional_embedding",
+                    &[n_ctxs, n_states],
+                    nn::Init::Const(0.0),
+                )
+                .to_device(Device::cuda_if_available()),
             mask: Tensor::empty(&[n_ctxs, n_ctxs], default_dtype())
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
@@ -413,7 +419,10 @@ impl TextDecoder {
 
         // return logits
 
-        let mut x = self.token_emb.forward(xs)
+        let mut x = self
+            .token_emb
+            .forward(xs)
+            .to_device(Device::cuda_if_available())
             + self
                 .position_emb
                 .i(offset..offset + *xs.size().last().unwrap());
