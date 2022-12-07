@@ -15,7 +15,6 @@ impl nn::Module for LayerNorm {
         self.0
             .forward(&xs.to_dtype(tch::Kind::Float, false, false))
             .to_dtype(xs.kind(), false, false)
-            .to_device(Device::cuda_if_available())
     }
 }
 
@@ -31,7 +30,6 @@ impl nn::Module for Linear {
                 .as_ref()
                 .map(|bs| bs.to_dtype(xs.kind(), false, false)),
         )
-        .to_device(Device::cuda_if_available())
     }
 }
 
@@ -63,9 +61,8 @@ impl<T: nn::Module> nn::Module for Cached<T> {
         let output = self.inner.forward(xs);
 
         let output = match self.cache.take() {
-            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1)
-                .detach()
-                .to_device(Device::cuda_if_available()),
+            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1).detach(),
+
             // save as-is, for the first token or cross attention
             _ => output,
         };
@@ -75,19 +72,16 @@ impl<T: nn::Module> nn::Module for Cached<T> {
     }
 }
 
-pub fn default_dtype() -> (Kind, Device) {
-    (Kind::Float, Device::cuda_if_available())
-}
-
 /// Returns sinusoids for positional embedding
 /// `max_timescale` defaults to 10000.
-pub fn sinusoids(length: i64, channels: i64, max_timescale: Option<f32>) -> Tensor {
+pub fn sinusoids(length: i64, channels: i64, max_timescale: Option<f32>, device: Device) -> Tensor {
     debug_assert!(channels % 2 == 0, "number of channels must be even");
     let log_timescale_increment =
         f32::ln(max_timescale.unwrap_or(10000.0)) / (channels / 2 - 1) as f32;
-    let inv_timescales =
-        (-log_timescale_increment * Tensor::arange((channels / 2) as i64, default_dtype())).exp();
-    let scaled_time = Tensor::arange(length as i64, default_dtype()).i((.., NewAxis))
+    let inv_timescales = (-log_timescale_increment
+        * Tensor::arange((channels / 2) as i64, (Kind::Float, device)))
+    .exp();
+    let scaled_time = Tensor::arange(length as i64, (Kind::Float, device)).i((.., NewAxis))
         * inv_timescales.i((NewAxis, ..));
     Tensor::cat(&[scaled_time.sin(), scaled_time.cos()], 1)
 }
@@ -298,6 +292,7 @@ impl AudioEncoder {
         n_states: i64,
         n_heads: i64,
         n_layers: i64,
+        device: Device,
     ) -> Self {
         Self {
             conv1: nn::conv1d(
@@ -324,7 +319,7 @@ impl AudioEncoder {
             blocks: (0..n_layers)
                 .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, false))
                 .collect(),
-            position_emb: sinusoids(n_ctxs, n_states, None).to_device(Device::cuda_if_available()),
+            position_emb: sinusoids(n_ctxs, n_states, None, device),
             ln_post: nn::layer_norm(
                 &vs / "ln_post",
                 vec![n_states],
@@ -377,6 +372,7 @@ impl TextDecoder {
         n_states: i64,
         n_heads: i64,
         n_layers: i64,
+        device: Device,
     ) -> Self {
         Self {
             token_emb: nn::embedding(
@@ -385,14 +381,12 @@ impl TextDecoder {
                 n_states,
                 nn::EmbeddingConfig::default(),
             ),
-            position_emb: vs
-                .var(
-                    "positional_embedding",
-                    &[n_ctxs, n_states],
-                    nn::Init::Const(0.0),
-                )
-                .to_device(Device::cuda_if_available()),
-            mask: Tensor::empty(&[n_ctxs, n_ctxs], default_dtype())
+            position_emb: vs.var(
+                "positional_embedding",
+                &[n_ctxs, n_states],
+                nn::Init::Const(0.0),
+            ),
+            mask: Tensor::empty(&[n_ctxs, n_ctxs], (Kind::Float, device))
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
             blocks: (0..n_layers)
@@ -419,10 +413,7 @@ impl TextDecoder {
 
         // return logits
 
-        let mut x = self
-            .token_emb
-            .forward(xs)
-            .to_device(Device::cuda_if_available())
+        let mut x = self.token_emb.forward(xs)
             + self
                 .position_emb
                 .i(offset..offset + *xs.size().last().unwrap());
@@ -446,6 +437,8 @@ impl TextDecoder {
 
 #[derive(Debug)]
 pub struct Whisper {
+    device: Device,
+
     pub encoder: AudioEncoder,
     pub decoder: TextDecoder,
     pub dims: ModelDims,
@@ -466,6 +459,8 @@ pub struct ModelDims {
 
 impl Whisper {
     pub fn new<'a>(vs: nn::Path<'a>, dims: ModelDims) -> Self {
+        let device = vs.device();
+
         Self {
             encoder: AudioEncoder::new(
                 &vs / "encoder",
@@ -473,6 +468,7 @@ impl Whisper {
                 dims.n_audio_states,
                 dims.n_audio_heads,
                 dims.n_audio_layers,
+                device,
             ),
             decoder: TextDecoder::new(
                 &vs / "decoder",
@@ -481,7 +477,9 @@ impl Whisper {
                 dims.n_text_states,
                 dims.n_text_heads,
                 dims.n_text_layers,
+                device,
             ),
+            device,
             dims,
         }
     }
@@ -489,5 +487,9 @@ impl Whisper {
     pub fn forward_ext(&self, mel: &Tensor, tokens: &Tensor) -> Tensor {
         self.decoder
             .forward_ext(tokens, &self.encoder.forward(mel), 0)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }

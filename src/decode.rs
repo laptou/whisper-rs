@@ -14,6 +14,7 @@ use crate::{
 pub struct DecodeTask<'a> {
     model: &'a Whisper,
     options: DecodeOptions,
+    device: Device,
 
     sample_len: i64,
     sot_idx: usize,
@@ -203,31 +204,38 @@ impl TokenExtractor for BeamSearchTokenExtractor {
         let mut source_indices = vec![];
         let mut finished_sequences = vec![];
 
-        // tensor_dbg!(tokens);
-        // tensor_dbg!(logits);
-        // tensor_dbg!(sum_logprobs);
+        // copy the tokens into vec all at once to avoid several copies from GPU
+        // (expensive!)
+        let tokens_shape = tokens.size();
+        // dbg!(&tokens_shape);
+        let prefixes: Vec<i64> = tokens.view(-1).into();
 
         for i in 0..n_audio {
-            // vec of tuple of (sequence, score, source)
+            // map of sequence -> (score, source)
             let mut scores_sources = HashMap::new();
             let mut finished = HashMap::new();
 
             // STEP 1: calculate the cumulative log probabilities for possible
             // candidates
             for j in 0..self.beam_size {
-                let idx = (i * self.beam_size + j) as i64;
-                let prefix = tokens.i(idx);
+                let idx = i * self.beam_size + j;
+                let prefix =
+                    &prefixes[idx * tokens_shape[1] as usize..(idx + 1) * tokens_shape[1] as usize];
 
-                let topk = logprobs
-                    .i(idx)
-                    .topk((self.beam_size + 1) as i64, -1, true, true);
-                let topk: (Vec<f64>, Vec<i64>) = (topk.0.into(), topk.1.into());
+                let idx = idx as i64;
+                let (logprobs, tokens) =
+                    logprobs
+                        .i(idx)
+                        .topk((self.beam_size + 1) as i64, -1, true, true);
 
-                // tensor_dbg!(prefix);
+                let len = logprobs.size1().unwrap();
 
-                for (logprob, token) in topk.0.into_iter().zip(topk.1) {
-                    let new_logprob: f64 = (sum_logprobs.i(idx) + logprob).into();
-                    let mut sequence = Vec::<i64>::from(&prefix);
+                for i in 0..len {
+                    let logprob = logprobs.double_value(&[i]);
+                    let new_logprob: f64 = sum_logprobs.double_value(&[idx]) + logprob;
+
+                    let token = tokens.int64_value(&[i]);
+                    let mut sequence = Vec::from(prefix);
                     sequence.push(token);
 
                     scores_sources.insert(sequence, (new_logprob, idx));
@@ -411,8 +419,9 @@ impl<'a> DecodeTask<'a> {
             .expect("sot sequence doesn't contain sot token");
 
         Ok(Self {
-            model,
+            device: model.device(),
             options,
+            model,
 
             token_extractor: match options.token_extract_mode {
                 TokenExtractMode::Greedy(_n) => todo!(),
@@ -444,9 +453,6 @@ impl<'a> DecodeTask<'a> {
         audio_features: &Tensor,
         mut tokens: Tensor,
     ) -> (Tensor, Tensor, Vec<f32>) {
-
-        dbg!(tokens.device());
-
         let n_batch = tokens.size()[0];
         debug_assert_eq!(audio_features.size()[0], n_batch);
 
@@ -458,30 +464,22 @@ impl<'a> DecodeTask<'a> {
             let logits = {
                 let mut tokens = tokens.i(..);
 
-                // println!("d {tokens}");
-
                 if *tokens.size().last().unwrap() as usize > self.initial_tokens.len() {
                     // only need to use the last token except in the first forward pass
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
 
-                // println!("e {tokens}");
-
                 self.model.decoder.forward_ext(&tokens, &audio_features, i)
             };
 
-            // println!("f {logits}");
-
             if i == 0 {
                 let probs_at_sot = logits.i((.., self.sot_idx as i64)).softmax(-1, dtype.0);
-                // tensor_dbg!(probs_at_sot);
                 probs_at_sot
                     .i((.., self.tokenizer.token_id_nospeech as i64))
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
             }
 
             let logits = logits.i((.., -1));
-            // tensor_dbg!(logits);
             let logits = self
                 .logit_filters
                 .iter()
@@ -490,9 +488,8 @@ impl<'a> DecodeTask<'a> {
             let (new_tokens, completed) =
                 self.token_extractor
                     .update(tokens, logits, &mut sum_logprobs);
-            tokens = new_tokens.to_device(Device::cuda_if_available());
+            tokens = new_tokens.to_device(self.device);
 
-            // tensor_dbg!(tokens);
             if completed || *tokens.size().last().unwrap() > self.model.dims.n_text_ctxs {
                 break;
             }
@@ -505,7 +502,7 @@ impl<'a> DecodeTask<'a> {
         // without no_grad, pytorch will save the result of every operation for
         // calculating gradients which will cause the program to run out of
         // memory immediately
-        tch::no_grad(move || self.run_inner(mel))
+        tch::no_grad(move || self.run_inner(mel.to_device(self.device)))
     }
 
     fn run_inner(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
@@ -517,7 +514,7 @@ impl<'a> DecodeTask<'a> {
         let audio_features = self.model.encoder.forward(&mel);
         let repeated_tokens = Tensor::of_slice(&initial_tokens[..])
             .repeat(&[n_audio, 1])
-            .to_device(Device::cuda_if_available());
+            .to_device(self.device);
 
         // tensor_dbg!(&audio_features);
         // tensor_dbg!(&repeated_tokens);

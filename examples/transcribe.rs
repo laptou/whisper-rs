@@ -7,9 +7,10 @@ use whisper::{
 };
 
 pub fn main() {
-    println!("device = {:?}", Device::cuda_if_available());
+    let device = Device::cuda_if_available();
+    dbg!(device);
 
-    let mut vars = VarStore::new(Device::cuda_if_available());
+    let mut vars = VarStore::new(device);
     let model = Whisper::new(
         vars.root(),
         ModelDims {
@@ -24,8 +25,8 @@ pub fn main() {
             n_text_layers: 6,
         },
     );
-
     vars.load("weights.ot").unwrap();
+    vars.set_device(device);
 
     let mut dt = DecodeTask::new(
         &model,
@@ -46,7 +47,8 @@ pub fn main() {
 
     let mel_audio = whisper::audio::log_mel_spectrogram(&audio, &mel_filter);
     let mel_audio = whisper::audio::pad_or_trim(&mel_audio, whisper::audio::N_FRAMES);
-    let mel_audio = mel_audio.unsqueeze(0).to_device(Device::cuda_if_available());
+    let mel_audio = mel_audio
+        .unsqueeze(0);
 
     dt.run(mel_audio).unwrap();
 }
