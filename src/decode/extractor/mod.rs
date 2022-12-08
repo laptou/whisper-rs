@@ -1,13 +1,13 @@
-use tch::Tensor;
 use std::fmt::Debug;
+use tch::Tensor;
 
 use crate::model::Whisper;
 
-mod greedy;
 mod beam_search;
+mod greedy;
 
-pub use greedy::*;
 pub use beam_search::*;
+pub use greedy::*;
 
 #[derive(Debug, Clone, Copy)]
 pub enum TokenExtractMode {

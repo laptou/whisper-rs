@@ -1,9 +1,9 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+
 use std::fmt::Debug;
 use std::rc::Rc;
 
-use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
+use tch::{nn::Module, Device, IndexOp, Kind, Tensor};
 
 use crate::audio;
 use crate::util::tensor_dbg;
@@ -14,12 +14,12 @@ use crate::{
 
 pub use self::extractor::TokenExtractMode;
 use self::extractor::*;
-use self::sequencer::*;
 use self::filter::*;
+use self::sequencer::*;
 
 mod extractor;
-mod sequencer;
 mod filter;
+mod sequencer;
 
 #[derive(Debug)]
 pub struct DecodeTask<'a> {

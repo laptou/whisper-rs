@@ -1,4 +1,4 @@
-use tch::{Tensor, IndexOp};
+use tch::{IndexOp, Tensor};
 
 use super::SequenceRanker;
 

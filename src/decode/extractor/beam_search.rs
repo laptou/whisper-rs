@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use tch::{Device, IndexOp, Kind, NewAxis, Tensor};
+use tch::{IndexOp, Kind, Tensor};
 
 use crate::model::Whisper;
 

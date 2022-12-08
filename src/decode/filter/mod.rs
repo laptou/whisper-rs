@@ -1,5 +1,5 @@
-use tch::Tensor;
 use std::fmt::Debug;
+use tch::Tensor;
 
 mod suppress_blanks;
 mod suppress_tokens;
@@ -10,5 +10,5 @@ pub use suppress_tokens::*;
 pub use timestamp_tokens::*;
 
 pub trait LogitFilter: Debug {
-  fn apply(&self, logits: &mut Tensor, tokens: &Tensor);
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor);
 }
