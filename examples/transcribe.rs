@@ -45,7 +45,7 @@ pub fn main() {
     )
     .unwrap();
 
-    let audio = whisper::audio::load_audio("test/data/jfk.flac").unwrap();
+    let audio = whisper::audio::load_audio("test/data/export.mp3").unwrap();
     let output = task.run(&audio).unwrap();
     println!("{output:?}");
 }

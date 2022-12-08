@@ -103,7 +103,7 @@ impl<'a> TranscribeTask<'a> {
         let mut segments = vec![];
 
         while seek < n_frames {
-            let mel_audio_segment = audio::pad_or_trim(&mel_audio.i(seek..), audio::N_FRAMES);
+            let mel_audio_segment = audio::pad_or_trim(&mel_audio.i((.., seek..)), audio::N_FRAMES);
             let mut segment_duration = audio::CHUNK_LENGTH as f64;
 
             // we are only putting one audio track in there at once, so it should just return one result
@@ -125,14 +125,41 @@ impl<'a> TranscribeTask<'a> {
                 + 1;
 
             let ts_offset = seek as f64 * QUANTUM_LENGTH;
+            let token_id_ts_begin = self.tokenizer.token_id_ts_begin as i64;
 
             if ts_tokens_consecutive.size1()? > 0 {
                 // output contains two consecutive timestamp tokens
-                todo!()
+
+                let mut last_slice = 0;
+
+                for current_slice in ts_tokens_consecutive.iter::<i64>()? {
+                    let sliced_tokens = segment_tokens.slice(0, last_slice, current_slice, 1);
+                    let start_ts_pos = sliced_tokens.int64_value(&[0]) - token_id_ts_begin;
+                    let end_ts_pos = sliced_tokens.int64_value(&[-1]) - token_id_ts_begin;
+
+                    let token_offset = tokens.size1()?;
+
+                    segments.push(TranscribeOutputSegment {
+                        start_time: ts_offset + start_ts_pos as f64 * time_precision,
+                        end_time: ts_offset + end_ts_pos as f64 * time_precision,
+                        start_token: token_offset + last_slice + 1,
+                        end_token: token_offset + current_slice,
+                        seek,
+                        text: self.tokenizer.decode(&sliced_tokens)?,
+                    });
+
+                    last_slice = current_slice;
+                }
+
+                let last_ts_pos = segment_tokens.int64_value(&[last_slice - 1]) - token_id_ts_begin;
+                seek += last_ts_pos * input_stride;
+                tokens = Tensor::cat(
+                    &[tokens, segment_tokens.slice(0, None, last_slice + 1, 1)],
+                    -1,
+                );
             } else {
                 let timestamps = segment_tokens.index(&[Some(ts_tokens.nonzero().flatten(0, -1))]);
 
-                let token_id_ts_begin = self.tokenizer.token_id_ts_begin as i64;
                 let last_token_id = i64::from(timestamps.i(-1));
                 if timestamps.size()[0] > 0 && last_token_id != token_id_ts_begin {
                     // no consecutive timestamps but it has a timestamp; use the last one.
@@ -151,9 +178,8 @@ impl<'a> TranscribeTask<'a> {
                 });
 
                 seek += N_FRAMES;
+                tokens = Tensor::cat(&[tokens, segment_tokens], -1);
             }
-
-            tokens = Tensor::cat(&[tokens, segment_tokens], -1);
         }
 
         let text = self.tokenizer.decode(&tokens)?;
