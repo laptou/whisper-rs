@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use anyhow::Context;
 use tch::{IndexOp, Kind, Tensor};
@@ -14,12 +14,24 @@ use crate::{
 pub struct TranscribeTask<'a> {
     model: &'a Whisper,
     decode_task: DecodeTask<'a>,
-    tokenizer: Arc<Tokenizer>,
+    tokenizer: Rc<Tokenizer>,
+
+    prompt: TranscribePrompt,
+
     device: tch::Device,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
+pub enum TranscribePrompt {
+    Pretokenized(Vec<u32>),
+    Text(String),
+
+    None { condition_on_prev_text: bool },
+}
+
+#[derive(Debug)]
 pub struct TranscribeOptions {
+    // decode options
     pub sample_len: Option<usize>,
     pub token_extract_mode: TokenExtractMode,
     pub len_penalty: Option<f64>,
@@ -27,6 +39,11 @@ pub struct TranscribeOptions {
     pub timestamps: bool,
     pub suppress_blank: bool,
     pub suppress_tokens: Option<Vec<u32>>,
+
+    // transcribe options
+    /// Initial prompt for transcription, which is prepended to the input and to
+    /// the output.
+    pub prompt: TranscribePrompt,
 }
 
 #[derive(Debug)]
@@ -51,7 +68,7 @@ impl<'a> TranscribeTask<'a> {
         let device = model.device();
 
         let tokenizer =
-            Arc::new(Tokenizer::new(Task::Transcribe).context("failed to create tokenizer")?);
+            Rc::new(Tokenizer::new(Task::Transcribe).context("failed to create tokenizer")?);
 
         let decode_task = DecodeTask::new(
             model,
@@ -65,6 +82,8 @@ impl<'a> TranscribeTask<'a> {
                 timestamps: options.timestamps,
                 suppress_blank: options.suppress_blank,
                 suppress_tokens: options.suppress_tokens,
+                // prompt is set at runtime loop
+                prompt: None,
             },
         )
         .context("failed to create decode task")?;
@@ -74,6 +93,7 @@ impl<'a> TranscribeTask<'a> {
             model,
             tokenizer,
             decode_task,
+            prompt: options.prompt,
         })
     }
 
@@ -99,12 +119,42 @@ impl<'a> TranscribeTask<'a> {
         let time_precision = input_stride as f64 * QUANTUM_LENGTH;
 
         let mut seek = 0;
-        let mut tokens = Tensor::empty(&[0], (Kind::Float, self.device));
+
+        let mut tokens = {
+            // if we have an initial prompt, prepend it to the list of
+            // tokens we generate, so that it is fed into the decoder
+            let tokens = match &self.prompt {
+                TranscribePrompt::Pretokenized(t) => t.iter().copied().map(|t| t as i64).collect(),
+                TranscribePrompt::Text(t) => {
+                    let tokens = self.tokenizer.encode(t.as_str(), true).unwrap();
+                    let tokens = Vec::from(tokens.get_ids());
+                    tokens.into_iter().map(|t| t as i64).collect()
+                }
+                TranscribePrompt::None { .. } => vec![],
+            };
+
+            Tensor::of_slice(&tokens[..]).to_device(self.device)
+        };
+
+        let condition_on_prev_text = match &self.prompt {
+            TranscribePrompt::None {
+                condition_on_prev_text,
+            } => *condition_on_prev_text,
+            _ => true,
+        };
+
         let mut segments = vec![];
 
         while seek < n_frames {
             let mel_audio_segment = audio::pad_or_trim(&mel_audio.i((.., seek..)), audio::N_FRAMES);
             let mut segment_duration = audio::CHUNK_LENGTH as f64;
+
+            if condition_on_prev_text {
+                // put the tokens we have so far into the decoder
+                self.decode_task.set_prompt(Some(&tokens));
+            }
+
+            dbg!(&mel_audio_segment);
 
             // we are only putting one audio track in there at once, so it should just return one result
             let mut results = self.decode_task.run(&mel_audio_segment)?;

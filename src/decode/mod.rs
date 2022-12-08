@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::fmt::Debug;
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::rc::Rc;
 
 use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
@@ -11,28 +11,90 @@ use crate::{
     tokenize::{Task, Tokenizer},
 };
 
-#[derive(Debug)]
 pub struct DecodeTask<'a> {
     model: &'a Whisper,
     options: DecodeOptions,
     device: Device,
 
     /// Information related to the prompt given to the model
-    // Stored in an `Rc<RefCell<>>` b/c it may change at runtime
-    prompt: Rc<RefCell<DecodeTaskPrompt>>,
+    // Stored in an `Rc<Cell<>>` b/c it may change at runtime
+    prompt: Rc<RefCell<DecodePrompt>>,
 
     tokenizer: Rc<Tokenizer>,
     logit_filters: Vec<Box<dyn LogitFilter>>,
     token_extractor: Box<dyn TokenExtractor>,
     sequence_ranker: Box<dyn SequenceRanker>,
+    sample_len: i64,
 }
 
+impl<'a> Debug for DecodeTask<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecodeTask")
+            .field("model", &self.model)
+            .field("options", &self.options)
+            .field("device", &self.device)
+            .field("tokenizer", &self.tokenizer)
+            .field("logit_filters", &self.logit_filters)
+            .field("token_extractor", &self.token_extractor)
+            .field("sequence_ranker", &self.sequence_ranker)
+            .finish()
+    }
+}
 
 #[derive(Debug)]
-struct DecodeTaskPrompt {
-    sample_len: i64,
+struct DecodePrompt {
+    sample_begin: i64,
     sot_idx: usize,
-    initial_tokens: Vec<u32>,
+    initial_tokens: Tensor,
+}
+
+impl DecodePrompt {
+    pub fn new(prompt: Option<&Tensor>, tokenizer: &Tokenizer, device: Device) -> Self {
+        let seq_sot: Vec<_> = tokenizer
+            .sequence_sot()
+            .into_iter()
+            .map(|t| t as i64)
+            .collect();
+
+        let initial_tokens = if let Some(prompt) = prompt {
+            // if we have a prompt, concat the start-of-previous sequence, the
+            // prompt, and the start-of-transcript sequence
+
+            let mut initial_tokens = Tensor::empty(
+                &[1 + prompt.size1().unwrap() + seq_sot.len() as i64],
+                (Kind::Int64, device),
+            );
+
+            initial_tokens
+                .narrow(0, 0, 1)
+                .copy_(&Tensor::from(tokenizer.token_id_startofprev as i64));
+
+            initial_tokens
+                .narrow(0, 1, prompt.size1().unwrap())
+                .copy_(&prompt);
+
+            initial_tokens
+                .narrow(0, 1 + prompt.size1().unwrap(), seq_sot.len() as i64)
+                .copy_(&Tensor::of_slice(seq_sot.as_slice()));
+
+            initial_tokens
+        } else {
+            Tensor::of_slice(seq_sot.as_slice())
+        };
+
+        let sample_begin = initial_tokens.size1().unwrap();
+
+        let sot_idx = initial_tokens
+            .eq(tokenizer.token_id_sot as i64)
+            .nonzero()
+            .int64_value(&[0]) as usize;
+
+        Self {
+            sample_begin,
+            sot_idx,
+            initial_tokens,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -45,7 +107,7 @@ pub struct DecodeOptions {
     pub timestamps: bool,
     pub suppress_blank: bool,
     pub suppress_tokens: Option<Vec<u32>>,
-    pub prompt: Option<Vec<u32>>,
+    pub prompt: Option<Tensor>,
 }
 
 #[derive(Debug)]
@@ -64,7 +126,7 @@ pub struct DecodeOutput {
 #[derive(Debug, Clone, Copy)]
 pub enum TokenExtractMode {
     Greedy(usize),
-    BeamSeRch { beam_size: usize, patience: f32 },
+    BeamSearch { beam_size: usize, patience: f32 },
 }
 
 /// This is called `TokenDecoder` in original Whisper source. Is used to
@@ -183,14 +245,14 @@ impl TokenExtractor for GreedyTokenExtractor {
 }
 
 #[derive(Debug)]
-struct BeamSeRchTokenExtractor {
+struct BeamSearchTokenExtractor {
     token_id_eot: u32,
     beam_size: usize,
     finished_sequences: Option<Vec<HashMap<Vec<i64>, f64>>>,
     patience: f32,
 }
 
-impl TokenExtractor for BeamSeRchTokenExtractor {
+impl TokenExtractor for BeamSearchTokenExtractor {
     fn reset(&mut self) {
         self.finished_sequences = None;
     }
@@ -423,11 +485,11 @@ trait LogitFilter: Debug {
 #[derive(Debug)]
 struct SuppressBlank {
     suppress_indices: Tensor,
-    sample_begin: i64,
+    prompt: Rc<RefCell<DecodePrompt>>,
 }
 
 impl SuppressBlank {
-    fn new(tokenizer: &Tokenizer, sample_begin: i64, device: Device) -> Self {
+    fn new(tokenizer: &Tokenizer, prompt: Rc<RefCell<DecodePrompt>>, device: Device) -> Self {
         let token_id_space = tokenizer
             .encode(" ", true)
             .unwrap()
@@ -440,14 +502,14 @@ impl SuppressBlank {
         Self {
             suppress_indices: Tensor::of_slice(&[token_id_space as i64, token_id_eot as i64])
                 .to_device(device),
-            sample_begin,
+            prompt,
         }
     }
 }
 
 impl LogitFilter for SuppressBlank {
     fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
-        if tokens.size()[1] == self.sample_begin {
+        if tokens.size()[1] == self.prompt.borrow().sample_begin {
             logits.index_fill_(1, &self.suppress_indices, f64::NEG_INFINITY);
         }
     }
@@ -477,22 +539,22 @@ impl LogitFilter for SuppressTokens {
 #[derive(Debug)]
 struct TimestampTokens {
     max_initial_timestamp_index: Option<i64>,
-    sample_begin: i64,
     tokenizer: Rc<Tokenizer>,
     device: Device,
+    prompt: Rc<RefCell<DecodePrompt>>,
 }
 
 impl TimestampTokens {
     fn new(
         tokenizer: Rc<Tokenizer>,
-        sample_begin: i64,
+        prompt: Rc<RefCell<DecodePrompt>>,
         max_initial_timestamp_index: Option<i64>,
         device: Device,
     ) -> Self {
         Self {
             device,
             tokenizer,
-            sample_begin,
+            prompt,
             max_initial_timestamp_index,
         }
     }
@@ -500,6 +562,8 @@ impl TimestampTokens {
 
 impl LogitFilter for TimestampTokens {
     fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
+        let sample_begin = self.prompt.borrow().sample_begin;
+
         logits.index_fill_(
             1,
             &Tensor::from(self.tokenizer.token_id_no_timestamps as i64).to_device(self.device),
@@ -511,7 +575,7 @@ impl LogitFilter for TimestampTokens {
         // timestamps have to appear in pairs, except directly before EOT; mask
         // logits accordingly
         for k in 0..tokens.size()[0] {
-            let seq: Vec<i64> = tokens.i((k, self.sample_begin..)).into();
+            let seq: Vec<i64> = tokens.i((k, sample_begin..)).into();
             let last_was_timestamp = match seq.last() {
                 Some(&last) => last >= token_id_timestampbegin,
                 None => false,
@@ -534,7 +598,7 @@ impl LogitFilter for TimestampTokens {
             }
         }
 
-        if tokens.size()[1] == self.sample_begin {
+        if tokens.size()[1] == sample_begin {
             // suppress generating non-timestamp tokens at the beginning
             logits
                 .i((.., ..token_id_timestampbegin))
@@ -579,27 +643,12 @@ impl<'a> DecodeTask<'a> {
             .sample_len
             .map_or(model.dims.n_text_ctxs / 2, |s| s as i64);
 
-        let mut initial_tokens = tokenizer.sequence_sot();
-
-        if let Some(prompt) = &options.prompt {
-            let new_initial_tokens = vec![tokenizer.token_id_startofprev];
-            new_initial_tokens.extend(prompt);
-            new_initial_tokens.extend(initial_tokens);
-            initial_tokens = new_initial_tokens;
-        }
-
-        let sample_begin = initial_tokens.len() as i64;
-        let sot_idx = initial_tokens
-            .iter()
-            .position(|&t| t == tokenizer.token_id_sot)
-            .expect("sot sequence doesn't contain sot token");
-
         let token_extractor = match options.token_extract_mode {
             TokenExtractMode::Greedy(_n) => todo!(),
-            TokenExtractMode::BeamSeRch {
+            TokenExtractMode::BeamSearch {
                 beam_size,
                 patience,
-            } => Box::new(BeamSeRchTokenExtractor {
+            } => Box::new(BeamSearchTokenExtractor {
                 beam_size,
                 token_id_eot: tokenizer.token_id_eot,
                 finished_sequences: None,
@@ -611,12 +660,18 @@ impl<'a> DecodeTask<'a> {
             length_penalty: options.len_penalty,
         });
 
+        let prompt = Rc::new(RefCell::new(DecodePrompt::new(
+            options.prompt.as_ref(),
+            &*tokenizer,
+            device,
+        )));
+
         let mut logit_filters: Vec<Box<dyn LogitFilter>> = vec![];
 
         if options.suppress_blank {
             logit_filters.push(Box::new(SuppressBlank::new(
                 &tokenizer,
-                sample_begin,
+                prompt.clone(),
                 device,
             )));
         }
@@ -635,7 +690,7 @@ impl<'a> DecodeTask<'a> {
 
             logit_filters.push(Box::new(TimestampTokens::new(
                 tokenizer.clone(),
-                sample_begin,
+                prompt.clone(),
                 max_initial_timestamp_index,
                 device,
             )));
@@ -650,31 +705,15 @@ impl<'a> DecodeTask<'a> {
             sequence_ranker,
 
             tokenizer,
-            sot_idx,
+            prompt,
             sample_len,
-            initial_tokens,
             logit_filters,
         })
     }
 
-    pub fn set_prompt(&mut self, prompt: Option<&[u32]>) {
-        let mut initial_tokens = self.tokenizer.sequence_sot();
-
-        if let Some(prompt) = prompt {
-            let new_initial_tokens = vec![self.tokenizer.token_id_startofprev];
-            new_initial_tokens.extend(prompt);
-            new_initial_tokens.extend(initial_tokens);
-            initial_tokens = new_initial_tokens;
-        }
-
-        let sample_begin = initial_tokens.len() as i64;
-        let sot_idx = initial_tokens
-            .iter()
-            .position(|&t| t == self.tokenizer.token_id_sot)
-            .expect("sot sequence doesn't contain sot token");
-
-        self.initial_tokens = initial_tokens;
-        self.sot_idx = sot_idx;
+    pub fn set_prompt(&mut self, prompt: Option<&Tensor>) {
+        self.prompt
+            .replace(DecodePrompt::new(prompt, &*self.tokenizer, self.device));
     }
 
     fn main_loop(
@@ -689,11 +728,13 @@ impl<'a> DecodeTask<'a> {
         let mut sum_logprobs = Tensor::zeros(&[n_batch], dtype);
         let mut no_speech_probs = vec![f32::NAN; n_batch as usize];
 
+        let prompt = &*self.prompt.borrow();
+
         for i in 0..self.sample_len {
             let logits = {
                 let mut tokens = tokens.i(..);
 
-                if *tokens.size().last().unwrap() as usize > self.initial_tokens.len() {
+                if *tokens.size().last().unwrap() > prompt.sample_begin {
                     // only need to use the last token except in the first forward pass
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
@@ -702,7 +743,7 @@ impl<'a> DecodeTask<'a> {
             };
 
             if i == 0 {
-                let probs_at_sot = logits.i((.., self.sot_idx as i64)).softmax(-1, dtype.0);
+                let probs_at_sot = logits.i((.., prompt.sot_idx as i64)).softmax(-1, dtype.0);
                 probs_at_sot
                     .i((.., self.tokenizer.token_id_no_speech as i64))
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
@@ -739,11 +780,11 @@ impl<'a> DecodeTask<'a> {
 
         debug_assert_eq!(n_frames, audio::N_FRAMES);
 
-        let initial_tokens: Vec<_> = self.initial_tokens.iter().map(|t| *t as i64).collect();
-        // dbg!(&initial_tokens);
-
         let audio_features = self.model.encoder.forward(&mel_audio);
-        let repeated_tokens = Tensor::of_slice(&initial_tokens[..])
+        let repeated_tokens = self
+            .prompt
+            .borrow()
+            .initial_tokens
             .repeat(&[n_audio, 1])
             .to_device(self.device);
 
@@ -752,7 +793,7 @@ impl<'a> DecodeTask<'a> {
 
         let n_group = match self.options.token_extract_mode {
             TokenExtractMode::Greedy(n) => n,
-            TokenExtractMode::BeamSeRch { beam_size, .. } => beam_size,
+            TokenExtractMode::BeamSearch { beam_size, .. } => beam_size,
         } as i64;
 
         // dbg!(&n_group);
@@ -789,6 +830,8 @@ impl<'a> DecodeTask<'a> {
         // tensor_dbg!(&tokens);
         // tensor_dbg!(&sum_logprobs);
 
+        let sample_begin = self.prompt.borrow().sample_begin;
+
         // get the final candidates for each group, and slice between the first sampled token and EOT
         let (tokens, sum_logprobs) = self.token_extractor.finalize(tokens, sum_logprobs);
         let tokens: Vec<Vec<Tensor>> = tokens
@@ -801,7 +844,7 @@ impl<'a> DecodeTask<'a> {
                             .nonzero()
                             .int64_value(&[0, 0]);
 
-                        t.i(self.initial_tokens.len() as i64..end)
+                        t.i(sample_begin..end)
                     })
                     .collect()
             })

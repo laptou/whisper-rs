@@ -3,7 +3,8 @@ use tch::{nn::VarStore, Device};
 use whisper::{
     self,
     decode::{DecodeOptions, DecodeTask},
-    model::{ModelDims, Whisper}, transcribe::{TranscribeTask, TranscribeOptions},
+    model::{ModelDims, Whisper},
+    transcribe::{TranscribeOptions, TranscribeTask, TranscribePrompt},
 };
 
 pub fn main() {
@@ -41,6 +42,9 @@ pub fn main() {
             suppress_blank: true,
             suppress_tokens: Some(vec![]),
             timestamps: true,
+            prompt: TranscribePrompt::None {
+                condition_on_prev_text: true,
+            },
         },
     )
     .unwrap();
