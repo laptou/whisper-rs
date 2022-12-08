@@ -1,14 +1,14 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::rc::Rc;
 
-use anyhow::Context;
 use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
 
 use crate::audio;
 use crate::{
     model::Whisper,
     tokenize::{Task, Tokenizer},
-    util::tensor_dbg,
 };
 
 #[derive(Debug)]
@@ -17,16 +17,25 @@ pub struct DecodeTask<'a> {
     options: DecodeOptions,
     device: Device,
 
-    sample_len: i64,
-    sot_idx: usize,
-    initial_tokens: Vec<u32>,
-    tokenizer: Arc<Tokenizer>,
+    /// Information related to the prompt given to the model
+    // Stored in an `Rc<RefCell<>>` b/c it may change at runtime
+    prompt: Rc<RefCell<DecodeTaskPrompt>>,
+
+    tokenizer: Rc<Tokenizer>,
     logit_filters: Vec<Box<dyn LogitFilter>>,
     token_extractor: Box<dyn TokenExtractor>,
     sequence_ranker: Box<dyn SequenceRanker>,
 }
 
-#[derive(Debug, Clone)]
+
+#[derive(Debug)]
+struct DecodeTaskPrompt {
+    sample_len: i64,
+    sot_idx: usize,
+    initial_tokens: Vec<u32>,
+}
+
+#[derive(Debug)]
 pub struct DecodeOptions {
     pub task: Task,
     pub sample_len: Option<usize>,
@@ -36,6 +45,7 @@ pub struct DecodeOptions {
     pub timestamps: bool,
     pub suppress_blank: bool,
     pub suppress_tokens: Option<Vec<u32>>,
+    pub prompt: Option<Vec<u32>>,
 }
 
 #[derive(Debug)]
@@ -51,18 +61,10 @@ pub struct DecodeOutput {
     // pub compression_ratio: f32,
 }
 
-#[derive(Debug)]
-pub struct DecodeOutputSegment {
-    pub seek: usize,
-    pub start: usize,
-    pub end: usize,
-    pub text: String,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub enum TokenExtractMode {
     Greedy(usize),
-    BeamSearch { beam_size: usize, patience: f32 },
+    BeamSeRch { beam_size: usize, patience: f32 },
 }
 
 /// This is called `TokenDecoder` in original Whisper source. Is used to
@@ -98,7 +100,7 @@ trait TokenExtractor: Debug {
         sum_logprobs: &mut Tensor,
     ) -> (Tensor, bool);
 
-    /// Finalize search and return the final candidate sequences
+    /// Finalize seRch and return the final candidate sequences
     ///
     /// Parameters
     /// ----------
@@ -181,14 +183,14 @@ impl TokenExtractor for GreedyTokenExtractor {
 }
 
 #[derive(Debug)]
-struct BeamSearchTokenExtractor {
+struct BeamSeRchTokenExtractor {
     token_id_eot: u32,
     beam_size: usize,
     finished_sequences: Option<Vec<HashMap<Vec<i64>, f64>>>,
     patience: f32,
 }
 
-impl TokenExtractor for BeamSearchTokenExtractor {
+impl TokenExtractor for BeamSeRchTokenExtractor {
     fn reset(&mut self) {
         self.finished_sequences = None;
     }
@@ -476,13 +478,13 @@ impl LogitFilter for SuppressTokens {
 struct TimestampTokens {
     max_initial_timestamp_index: Option<i64>,
     sample_begin: i64,
-    tokenizer: Arc<Tokenizer>,
+    tokenizer: Rc<Tokenizer>,
     device: Device,
 }
 
 impl TimestampTokens {
     fn new(
-        tokenizer: Arc<Tokenizer>,
+        tokenizer: Rc<Tokenizer>,
         sample_begin: i64,
         max_initial_timestamp_index: Option<i64>,
         device: Device,
@@ -568,7 +570,7 @@ impl LogitFilter for TimestampTokens {
 impl<'a> DecodeTask<'a> {
     pub fn new(
         model: &'a Whisper,
-        tokenizer: Arc<Tokenizer>,
+        tokenizer: Rc<Tokenizer>,
         options: DecodeOptions,
     ) -> anyhow::Result<Self> {
         let device = model.device();
@@ -577,7 +579,15 @@ impl<'a> DecodeTask<'a> {
             .sample_len
             .map_or(model.dims.n_text_ctxs / 2, |s| s as i64);
 
-        let initial_tokens = tokenizer.sequence_sot();
+        let mut initial_tokens = tokenizer.sequence_sot();
+
+        if let Some(prompt) = &options.prompt {
+            let new_initial_tokens = vec![tokenizer.token_id_startofprev];
+            new_initial_tokens.extend(prompt);
+            new_initial_tokens.extend(initial_tokens);
+            initial_tokens = new_initial_tokens;
+        }
+
         let sample_begin = initial_tokens.len() as i64;
         let sot_idx = initial_tokens
             .iter()
@@ -586,10 +596,10 @@ impl<'a> DecodeTask<'a> {
 
         let token_extractor = match options.token_extract_mode {
             TokenExtractMode::Greedy(_n) => todo!(),
-            TokenExtractMode::BeamSearch {
+            TokenExtractMode::BeamSeRch {
                 beam_size,
                 patience,
-            } => Box::new(BeamSearchTokenExtractor {
+            } => Box::new(BeamSeRchTokenExtractor {
                 beam_size,
                 token_id_eot: tokenizer.token_id_eot,
                 finished_sequences: None,
@@ -645,6 +655,26 @@ impl<'a> DecodeTask<'a> {
             initial_tokens,
             logit_filters,
         })
+    }
+
+    pub fn set_prompt(&mut self, prompt: Option<&[u32]>) {
+        let mut initial_tokens = self.tokenizer.sequence_sot();
+
+        if let Some(prompt) = prompt {
+            let new_initial_tokens = vec![self.tokenizer.token_id_startofprev];
+            new_initial_tokens.extend(prompt);
+            new_initial_tokens.extend(initial_tokens);
+            initial_tokens = new_initial_tokens;
+        }
+
+        let sample_begin = initial_tokens.len() as i64;
+        let sot_idx = initial_tokens
+            .iter()
+            .position(|&t| t == self.tokenizer.token_id_sot)
+            .expect("sot sequence doesn't contain sot token");
+
+        self.initial_tokens = initial_tokens;
+        self.sot_idx = sot_idx;
     }
 
     fn main_loop(
@@ -722,12 +752,12 @@ impl<'a> DecodeTask<'a> {
 
         let n_group = match self.options.token_extract_mode {
             TokenExtractMode::Greedy(n) => n,
-            TokenExtractMode::BeamSearch { beam_size, .. } => beam_size,
+            TokenExtractMode::BeamSeRch { beam_size, .. } => beam_size,
         } as i64;
 
         // dbg!(&n_group);
 
-        // repeat the audio & text tensors by the group size, for beam search or best-of-n sampling
+        // repeat the audio & text tensors by the group size, for beam seRch or best-of-n sampling
         let audio_features = audio_features.repeat_interleave_self_int(n_group, 0, None);
         let repeated_tokens = repeated_tokens.repeat_interleave_self_int(n_group, 0, None);
 
@@ -821,53 +851,6 @@ impl<'a> DecodeTask<'a> {
                 no_speech_prob,
             });
         }
-
-        // timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
-        // consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0].add_(1)
-        // if len(consecutive) > 0:  # if the output contains two consecutive timestamp tokens
-        //     last_slice = 0
-        //     for current_slice in consecutive:
-        //         sliced_tokens = tokens[last_slice:current_slice]
-        //         start_timestamp_position = (
-        //             sliced_tokens[0].item() - tokenizer.timestamp_begin
-        //         )
-        //         end_timestamp_position = (
-        //             sliced_tokens[-1].item() - tokenizer.timestamp_begin
-        //         )
-        //         add_segment(
-        //             start=timestamp_offset + start_timestamp_position * time_precision,
-        //             end=timestamp_offset + end_timestamp_position * time_precision,
-        //             text_tokens=sliced_tokens[1:-1],
-        //             result=result,
-        //         )
-        //         last_slice = current_slice
-        //     last_timestamp_position = (
-        //         tokens[last_slice - 1].item() - tokenizer.timestamp_begin
-        //     )
-        //     seek += last_timestamp_position * input_stride
-        //     all_tokens.extend(tokens[: last_slice + 1].tolist())
-        // else:
-        //     duration = segment_duration
-        //     timestamps = tokens[timestamp_tokens.nonzero().flatten()]
-        //     if len(timestamps) > 0 and timestamps[-1].item() != tokenizer.timestamp_begin:
-        //         # no consecutive timestamps but it has a timestamp; use the last one.
-        //         # single timestamp at the end means no speech after the last timestamp.
-        //         last_timestamp_position = timestamps[-1].item() - tokenizer.timestamp_begin
-        //         duration = last_timestamp_position * time_precision
-
-        //     add_segment(
-        //         start=timestamp_offset,
-        //         end=timestamp_offset + duration,
-        //         text_tokens=tokens,
-        //         result=result,
-        //     )
-
-        //     seek += segment.shape[-1]
-        //     all_tokens.extend(tokens.tolist())
-
-        // if not condition_on_previous_text or result.temperature > 0.5:
-        //     # do not feed the prompt tokens if a high temperature was used
-        //     prompt_reset_since = len(all_tokens)
 
         Ok(results)
     }
