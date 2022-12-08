@@ -2,9 +2,8 @@ use tch::{nn::VarStore, Device};
 
 use whisper::{
     self,
-    decode::{DecodeOptions, DecodeTask},
     model::{ModelDims, Whisper},
-    transcribe::{TranscribeOptions, TranscribeTask, TranscribePrompt},
+    transcribe::{TranscribeOptions, TranscribePrompt, TranscribeTask},
 };
 
 pub fn main() {
