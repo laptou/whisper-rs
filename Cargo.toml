@@ -13,7 +13,7 @@ hound = "3.5.0"
 mel_filter = "0.1.1"
 once_cell = "1.16.0"
 rubato = "0.12.0"
-symphonia = { version = "0.5.1", features = ["flac"] }
+symphonia = { version = "0.5.1", features = ["flac", "mp3"] }
 tch = "0.9.0"
 tokenizers = "0.13.2"
 
