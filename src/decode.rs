@@ -59,7 +59,6 @@ pub struct DecodeOutputSegment {
     pub text: String,
 }
 
-
 #[derive(Debug, Clone, Copy)]
 pub enum TokenExtractMode {
     Greedy(usize),
@@ -316,6 +315,8 @@ impl TokenExtractor for BeamSearchTokenExtractor {
     }
 
     fn finalize(&mut self, tokens: Tensor, sum_logprobs: Tensor) -> (Vec<Vec<Tensor>>, Tensor) {
+        let device = tokens.device();
+
         // collect all finished sequences, including patience, and add unfinished ones if not enough
 
         for (i, seqs) in self
@@ -349,12 +350,11 @@ impl TokenExtractor for BeamSearchTokenExtractor {
             .unwrap()
             .iter()
             .map(|seqs| {
-                let tmp: Vec<Tensor> = seqs.keys().map(|seq| Tensor::of_slice(seq)).collect();
-                // Tensor::stack(&tmp[..], 0)
-                tmp
+                seqs.keys()
+                    .map(|seq| Tensor::of_slice(seq).to_device(device))
+                    .collect()
             })
             .collect();
-        // let tokens = Tensor::stack(&tokens[..], 0);
 
         let sum_logprobs: Vec<Tensor> = self
             .finished_sequences
@@ -363,7 +363,7 @@ impl TokenExtractor for BeamSearchTokenExtractor {
             .iter()
             .map(|seqs| {
                 let t: Vec<f64> = seqs.values().copied().collect();
-                Tensor::of_slice(&t[..])
+                Tensor::of_slice(&t[..]).to_device(device)
             })
             .collect();
         let sum_logprobs = Tensor::stack(&sum_logprobs[..], 0);
@@ -566,7 +566,11 @@ impl LogitFilter for TimestampTokens {
 }
 
 impl<'a> DecodeTask<'a> {
-    pub fn new(model: &'a Whisper, tokenizer: Arc<Tokenizer>, options: DecodeOptions) -> anyhow::Result<Self> {
+    pub fn new(
+        model: &'a Whisper,
+        tokenizer: Arc<Tokenizer>,
+        options: DecodeOptions,
+    ) -> anyhow::Result<Self> {
         let device = model.device();
 
         let sample_len = options
@@ -773,8 +777,8 @@ impl<'a> DecodeTask<'a> {
             })
             .collect();
 
-        dbg!(&tokens);
-        tensor_dbg!(&sum_logprobs);
+        // dbg!(&tokens);
+        // tensor_dbg!(&sum_logprobs);
 
         // select the top-ranked sample in each group
         let selected = self.sequence_ranker.rank(&tokens, &sum_logprobs);
@@ -809,7 +813,7 @@ impl<'a> DecodeTask<'a> {
             .zip(Vec::<f64>::from(&no_speech_probs))
             .enumerate()
         {
-           results.push(DecodeOutput {
+            results.push(DecodeOutput {
                 audio_features: audio_features.i(i as i64),
                 tokens,
                 text,

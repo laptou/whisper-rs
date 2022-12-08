@@ -4,7 +4,7 @@ use anyhow::Context;
 use tch::{IndexOp, Kind, Tensor};
 
 use crate::{
-    audio,
+    audio::{self, N_FRAMES},
     decode::{DecodeOptions, DecodeTask, TokenExtractMode},
     model::Whisper,
     tokenize::{Task, Tokenizer},
@@ -150,7 +150,7 @@ impl<'a> TranscribeTask<'a> {
                     text: result.text,
                 });
 
-                seek += mel_audio_segment.size()[0];
+                seek += N_FRAMES;
             }
 
             tokens = Tensor::cat(&[tokens, segment_tokens], -1);
