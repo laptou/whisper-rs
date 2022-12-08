@@ -38,7 +38,7 @@ impl SuppressBlank {
 impl LogitFilter for SuppressBlank {
     fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
         if tokens.size()[1] == self.prompt.borrow().sample_begin {
-            logits.index_fill_(1, &self.suppress_indices, f64::NEG_INFINITY);
+            let _ = logits.index_fill_(1, &self.suppress_indices, f64::NEG_INFINITY);
         }
     }
 }

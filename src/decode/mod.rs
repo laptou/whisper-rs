@@ -24,7 +24,6 @@ mod sequencer;
 #[derive(Debug)]
 pub struct DecodeTask<'a> {
     model: &'a Whisper,
-    options: DecodeOptions,
     device: Device,
 
     /// Information related to the prompt given to the model
@@ -200,7 +199,6 @@ impl<'a> DecodeTask<'a> {
 
         Ok(Self {
             device,
-            options,
             model,
 
             token_extractor,

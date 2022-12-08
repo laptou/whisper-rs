@@ -34,7 +34,7 @@ impl LogitFilter for TimestampTokens {
     fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
         let sample_begin = self.prompt.borrow().sample_begin;
 
-        logits.index_fill_(
+        let _ = logits.index_fill_(
             1,
             &Tensor::from(self.tokenizer.token_id_no_timestamps as i64).to_device(self.device),
             f64::NEG_INFINITY,
@@ -56,12 +56,12 @@ impl LogitFilter for TimestampTokens {
             if last_was_timestamp {
                 if second_last_was_timestamp {
                     // has to be non-timestamp
-                    logits
+                    let _ = logits
                         .i((k, token_id_timestampbegin..))
                         .fill_(f64::NEG_INFINITY);
                 } else {
                     // cannot be normal text tokens
-                    logits
+                    let _ = logits
                         .i((k, ..self.tokenizer.token_id_eot as i64))
                         .fill_(f64::NEG_INFINITY);
                 }
@@ -70,13 +70,13 @@ impl LogitFilter for TimestampTokens {
 
         if tokens.size()[1] == sample_begin {
             // suppress generating non-timestamp tokens at the beginning
-            logits
+            let _ = logits
                 .i((.., ..token_id_timestampbegin))
                 .fill_(f64::NEG_INFINITY);
 
             if let Some(max_initial_timestamp_index) = self.max_initial_timestamp_index {
                 let last_allowed = token_id_timestampbegin + max_initial_timestamp_index;
-                logits.i((.., last_allowed + 1..)).fill_(f64::NEG_INFINITY);
+                let _ = logits.i((.., last_allowed + 1..)).fill_(f64::NEG_INFINITY);
             }
         }
 
@@ -92,7 +92,7 @@ impl LogitFilter for TimestampTokens {
                 logprobs.i((k, ..token_id_timestampbegin)).max().into();
 
             if timestamp_logprob > max_text_token_logprob {
-                logits
+              let _ = logits
                     .i((k, ..token_id_timestampbegin))
                     .fill_(f64::NEG_INFINITY);
             }
