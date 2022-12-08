@@ -1,5 +1,6 @@
 use tch::{nn::VarStore, Device};
 
+use tracing::info;
 use whisper::{
     self,
     model::{ModelDims, Whisper},
@@ -7,8 +8,15 @@ use whisper::{
 };
 
 pub fn main() {
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::FmtSubscriber::builder()
+            .pretty()
+            .finish(),
+    )
+    .unwrap();
+
     let device = Device::cuda_if_available();
-    dbg!(device);
+    info!("using device {device:?}");
 
     let mut vars = VarStore::new(device);
     let model = Whisper::new(
@@ -26,7 +34,7 @@ pub fn main() {
         },
     );
     vars.load("weights.ot").unwrap();
-    vars.set_device(device);
+    info!("loaded model weights");
 
     let mut task = TranscribeTask::new(
         &model,
@@ -48,8 +56,11 @@ pub fn main() {
         },
     )
     .unwrap();
+    info!("initialized transcription task");
 
-    let audio = whisper::audio::load_audio("test/data/export_resampled.wav").unwrap();
+    let audio = whisper::audio::load_audio("test/data/export.mp3").unwrap();
+    info!("loaded audio");
+
     let output = task.run(&audio).unwrap();
-    println!("{output:?}");
+    info!("transcribed audio, output: {output:#?}");
 }

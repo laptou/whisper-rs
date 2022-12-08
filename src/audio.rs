@@ -62,7 +62,7 @@ pub fn load_audio(path: impl AsRef<Path>) -> anyhow::Result<Tensor> {
     let track_sr = track
         .codec_params
         .sample_rate
-        .context("track sample rate is unknown")? as i64;
+        .context("track sample rate is unknown")? as usize;
 
     let num_channels = track
         .codec_params
@@ -70,23 +70,14 @@ pub fn load_audio(path: impl AsRef<Path>) -> anyhow::Result<Tensor> {
         .context("unknown channel count")?
         .count();
 
-    let mut resampler = if track_sr == SAMPLE_RATE {
+    let mut resampler = if track_sr == SAMPLE_RATE as usize {
         None
     } else {
-        // default parameters yoinked from rubato example
-        let params = rubato::InterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: rubato::InterpolationType::Linear,
-            oversampling_factor: 256,
-            window: rubato::WindowFunction::BlackmanHarris2,
-        };
-
-        let resampler = rubato::SincFixedIn::<f32>::new(
-            SAMPLE_RATE as f64 / track_sr as f64,
-            1.0,
-            params,
+        let resampler = rubato::FftFixedIn::<f32>::new(
+            track_sr,
+            SAMPLE_RATE as usize,
             RESAMPLE_CHUNK_SIZE,
+            2,
             // we downmix to mono before putting audio into the resampler
             1,
         )

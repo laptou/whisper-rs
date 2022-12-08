@@ -6,7 +6,6 @@ use std::rc::Rc;
 use tch::{nn::Module, Device, IndexOp, Kind, Tensor};
 
 use crate::audio;
-use crate::util::tensor_dbg;
 use crate::{
     model::Whisper,
     tokenize::{Task, Tokenizer},
@@ -73,19 +72,12 @@ impl DecodePrompt {
                 .narrow(0, 1 + prompt.size1().unwrap(), seq_sot.len() as i64)
                 .copy_(&Tensor::of_slice(seq_sot.as_slice()));
 
-            tensor_dbg!(prompt);
-
             initial_tokens
         } else {
             Tensor::of_slice(seq_sot.as_slice())
         };
 
-        tensor_dbg!(initial_tokens);
-
         let sample_begin = initial_tokens.size1().unwrap();
-
-        dbg!(sample_begin);
-
         let sot_idx = initial_tokens
             .eq(tokenizer.token_id_sot as i64)
             .nonzero()
@@ -370,8 +362,6 @@ impl<'a> DecodeTask<'a> {
                             .eq(self.tokenizer.token_id_eot as i64)
                             .nonzero()
                             .int64_value(&[0, 0]);
-
-                        tensor_dbg!(t);
 
                         t.i(sample_begin..end)
                     })

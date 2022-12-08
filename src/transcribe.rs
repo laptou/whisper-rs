@@ -155,8 +155,6 @@ impl<'a> TranscribeTask<'a> {
                 self.decode_task.set_prompt(Some(&tokens));
             }
 
-            dbg!(&mel_audio_segment);
-
             // we are only putting one audio track in there at once, so it should just return one result
             let mut results = self.decode_task.run(&mel_audio_segment)?;
             let result = results.remove(0);
