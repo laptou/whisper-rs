@@ -111,15 +111,22 @@ pub const LANGUAGES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 #[derive(Debug)]
 pub struct Tokenizer {
     pub tokenizer: tokenizers::Tokenizer,
+    /// "start of transcript" token
     pub token_id_sot: u32,
+    /// "translate" control token, tells model to translate text
     pub token_id_translate: u32,
+    /// "transcribe" control token, tells the model to transcribe text
     pub token_id_transcribe: u32,
+    /// "end of transcript" token
     pub token_id_eot: u32,
-    pub token_id_notimestamps: u32,
-    pub token_id_nospeech: u32,
+    /// "no timestamps" control token, tells the model not to generate timestamps
+    pub token_id_no_timestamps: u32,
+    /// "no speech" token, used to indicate there is no speech here
+    pub token_id_no_speech: u32,
     pub token_id_startofprev: u32,
     pub token_id_startoflm: u32,
-    pub token_id_timestampbegin: u32,
+    /// "timestamp begin" token, a timestamp should come after this
+    pub token_id_ts_begin: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -157,10 +164,6 @@ impl Tokenizer {
             .map(|t| tokenizers::AddedToken::from(t, true))
             .collect();
 
-        // let bpe_builder = tokenizers::models::bpe::BPE::from_file("gpt2/vocab.json", "gpt2/merges.txt");
-        // let bpe = bpe_builder.unk_token("<|endoftext|>".to_owned()).build().unwrap();
-        // let mut tok = Tokenizer::new(bpe);
-
         tokenizer.add_special_tokens(&special_tokens[..]);
 
         let special_token_ids: Vec<_> = special_tokens
@@ -173,11 +176,13 @@ impl Tokenizer {
             token_id_eot: tokenizer.token_to_id("<|endoftext|>").unwrap(),
             token_id_transcribe: tokenizer.token_to_id("<|transcribe|>").unwrap(),
             token_id_translate: tokenizer.token_to_id("<|translate|>").unwrap(),
-            token_id_notimestamps: tokenizer.token_to_id("<|notimestamps|>").unwrap(),
-            token_id_nospeech: tokenizer.token_to_id("<|nospeech|>").unwrap(),
+            token_id_no_timestamps: tokenizer.token_to_id("<|notimestamps|>").unwrap(),
+            token_id_no_speech: tokenizer.token_to_id("<|nospeech|>").unwrap(),
             token_id_startofprev: tokenizer.token_to_id("<|startofprev|>").unwrap(),
             token_id_startoflm: tokenizer.token_to_id("<|startoflm|>").unwrap(),
-            token_id_timestampbegin: *special_token_ids.last().unwrap() + 1,
+            // timestamp tokens are not real tokens, instead they are numbers
+            // that are outside the range of the tokenizer 
+            token_id_ts_begin: *special_token_ids.last().unwrap() + 1,
             tokenizer,
         })
     }

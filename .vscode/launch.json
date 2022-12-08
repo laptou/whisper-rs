@@ -26,15 +26,15 @@
     {
       "type": "lldb",
       "request": "launch",
-      "name": "Debug example 'ree'",
+      "name": "Debug example 'transcribe'",
       "cargo": {
         "args": [
           "build",
-          "--example=ree",
+          "--example=transcribe",
           "--package=whisper"
         ],
         "filter": {
-          "name": "ree",
+          "name": "transcribe",
           "kind": "example"
         }
       },

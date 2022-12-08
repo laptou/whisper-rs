@@ -4,6 +4,7 @@ use std::{collections::HashMap, sync::Arc};
 use anyhow::Context;
 use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
 
+use crate::audio;
 use crate::{
     model::Whisper,
     tokenize::{Task, Tokenizer},
@@ -19,41 +20,50 @@ pub struct DecodeTask<'a> {
     sample_len: i64,
     sot_idx: usize,
     initial_tokens: Vec<u32>,
-    tokenizer: Tokenizer,
+    tokenizer: Arc<Tokenizer>,
     logit_filters: Vec<Box<dyn LogitFilter>>,
     token_extractor: Box<dyn TokenExtractor>,
     sequence_ranker: Box<dyn SequenceRanker>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DecodeOptions {
     pub task: Task,
     pub sample_len: Option<usize>,
     pub token_extract_mode: TokenExtractMode,
     pub len_penalty: Option<f64>,
+    pub max_initial_timestamp: Option<f64>,
+    pub timestamps: bool,
+    pub suppress_blank: bool,
+    pub suppress_tokens: Option<Vec<u32>>,
 }
+
+#[derive(Debug)]
+pub struct DecodeOutput {
+    pub audio_features: Tensor,
+    // pub language: String,
+    // pub language_probs: Option<HashMap<String, f32>>,
+    pub tokens: Tensor,
+    pub text: String,
+    pub avg_logprob: f64,
+    pub no_speech_prob: f64,
+    // pub temperature: f32,
+    // pub compression_ratio: f32,
+}
+
+#[derive(Debug)]
+pub struct DecodeOutputSegment {
+    pub seek: usize,
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
 
 #[derive(Debug, Clone, Copy)]
 pub enum TokenExtractMode {
     Greedy(usize),
     BeamSearch { beam_size: usize, patience: f32 },
-}
-
-#[derive(Debug)]
-pub struct DecodingResult {
-    pub audio_features: Tensor,
-    pub language: String,
-    pub language_probs: Option<HashMap<String, f32>>,
-    pub tokens: Vec<u32>,
-    pub text: String,
-    pub avg_logprob: f32,
-    pub no_speech_prob: f32,
-    pub temperature: f32,
-    pub compression_ratio: f32,
-}
-
-trait LogitFilter: Debug {
-    fn apply(&self, logits: &mut Tensor, tokens: &Tensor);
 }
 
 /// This is called `TokenDecoder` in original Whisper source. Is used to
@@ -404,6 +414,10 @@ impl SequenceRanker for MaximumLikelihoodRanker {
     }
 }
 
+trait LogitFilter: Debug {
+    fn apply(&self, logits: &mut Tensor, tokens: &Tensor);
+}
+
 #[derive(Debug)]
 struct SuppressBlank {
     suppress_indices: Tensor,
@@ -411,7 +425,7 @@ struct SuppressBlank {
 }
 
 impl SuppressBlank {
-    fn new(tokenizer: &Tokenizer, sample_begin: i64) -> Self {
+    fn new(tokenizer: &Tokenizer, sample_begin: i64, device: Device) -> Self {
         let token_id_space = tokenizer
             .encode(" ", true)
             .unwrap()
@@ -422,7 +436,8 @@ impl SuppressBlank {
         let token_id_eot = tokenizer.token_id_eot;
 
         Self {
-            suppress_indices: Tensor::of_slice(&[token_id_space as i64, token_id_eot as i64]),
+            suppress_indices: Tensor::of_slice(&[token_id_space as i64, token_id_eot as i64])
+                .to_device(device),
             sample_begin,
         }
     }
@@ -442,11 +457,11 @@ struct SuppressTokens {
 }
 
 impl SuppressTokens {
-    fn new(token_ids: &[u32]) -> Self {
+    fn new(token_ids: &[u32], device: Device) -> Self {
         let token_ids: Vec<_> = token_ids.into_iter().map(|i| *i as i64).collect();
 
         Self {
-            suppress_indices: Tensor::of_slice(&token_ids[..]),
+            suppress_indices: Tensor::of_slice(&token_ids[..]).to_device(device),
         }
     }
 }
@@ -462,6 +477,7 @@ struct TimestampTokens {
     max_initial_timestamp_index: Option<i64>,
     sample_begin: i64,
     tokenizer: Arc<Tokenizer>,
+    device: Device,
 }
 
 impl TimestampTokens {
@@ -469,8 +485,10 @@ impl TimestampTokens {
         tokenizer: Arc<Tokenizer>,
         sample_begin: i64,
         max_initial_timestamp_index: Option<i64>,
+        device: Device,
     ) -> Self {
         Self {
+            device,
             tokenizer,
             sample_begin,
             max_initial_timestamp_index,
@@ -482,11 +500,11 @@ impl LogitFilter for TimestampTokens {
     fn apply(&self, logits: &mut Tensor, tokens: &Tensor) {
         logits.index_fill_(
             1,
-            &Tensor::from(self.tokenizer.token_id_notimestamps as i64),
+            &Tensor::from(self.tokenizer.token_id_no_timestamps as i64).to_device(self.device),
             f64::NEG_INFINITY,
         );
 
-        let token_id_timestampbegin = self.tokenizer.token_id_timestampbegin as i64;
+        let token_id_timestampbegin = self.tokenizer.token_id_ts_begin as i64;
 
         // timestamps have to appear in pairs, except directly before EOT; mask
         // logits accordingly
@@ -548,46 +566,80 @@ impl LogitFilter for TimestampTokens {
 }
 
 impl<'a> DecodeTask<'a> {
-    pub fn new(model: &'a Whisper, options: DecodeOptions) -> anyhow::Result<Self> {
+    pub fn new(model: &'a Whisper, tokenizer: Arc<Tokenizer>, options: DecodeOptions) -> anyhow::Result<Self> {
+        let device = model.device();
+
         let sample_len = options
             .sample_len
             .map_or(model.dims.n_text_ctxs / 2, |s| s as i64);
 
-        let tokenizer = Tokenizer::new(Task::Transcribe).context("failed to create tokenizer")?;
-
         let initial_tokens = tokenizer.sequence_sot();
+        let sample_begin = initial_tokens.len() as i64;
         let sot_idx = initial_tokens
             .iter()
             .position(|&t| t == tokenizer.token_id_sot)
             .expect("sot sequence doesn't contain sot token");
 
+        let token_extractor = match options.token_extract_mode {
+            TokenExtractMode::Greedy(_n) => todo!(),
+            TokenExtractMode::BeamSearch {
+                beam_size,
+                patience,
+            } => Box::new(BeamSearchTokenExtractor {
+                beam_size,
+                token_id_eot: tokenizer.token_id_eot,
+                finished_sequences: None,
+                patience,
+            }),
+        };
+
+        let sequence_ranker = Box::new(MaximumLikelihoodRanker {
+            length_penalty: options.len_penalty,
+        });
+
+        let mut logit_filters: Vec<Box<dyn LogitFilter>> = vec![];
+
+        if options.suppress_blank {
+            logit_filters.push(Box::new(SuppressBlank::new(
+                &tokenizer,
+                sample_begin,
+                device,
+            )));
+        }
+
+        if let Some(tokens) = &options.suppress_tokens {
+            logit_filters.push(Box::new(SuppressTokens::new(&tokens[..], device)));
+        }
+
+        if options.timestamps {
+            // usually 0.02 seconds
+            let precision = crate::audio::CHUNK_LENGTH as f64 / model.dims.n_audio_ctxs as f64;
+            let max_initial_timestamp_index = match options.max_initial_timestamp {
+                Some(mit) => Some(f64::round(mit / precision) as i64),
+                None => None,
+            };
+
+            logit_filters.push(Box::new(TimestampTokens::new(
+                tokenizer.clone(),
+                sample_begin,
+                max_initial_timestamp_index,
+                device,
+            )));
+        }
+
         Ok(Self {
-            device: model.device(),
+            device,
             options,
             model,
 
-            token_extractor: match options.token_extract_mode {
-                TokenExtractMode::Greedy(_n) => todo!(),
-                TokenExtractMode::BeamSearch {
-                    beam_size,
-                    patience,
-                } => Box::new(BeamSearchTokenExtractor {
-                    beam_size,
-                    token_id_eot: tokenizer.token_id_eot,
-                    finished_sequences: None,
-                    patience,
-                }),
-            },
-
-            sequence_ranker: Box::new(MaximumLikelihoodRanker {
-                length_penalty: options.len_penalty,
-            }),
+            token_extractor,
+            sequence_ranker,
 
             tokenizer,
             sot_idx,
             sample_len,
             initial_tokens,
-            logit_filters: vec![],
+            logit_filters,
         })
     }
 
@@ -618,7 +670,7 @@ impl<'a> DecodeTask<'a> {
             if i == 0 {
                 let probs_at_sot = logits.i((.., self.sot_idx as i64)).softmax(-1, dtype.0);
                 probs_at_sot
-                    .i((.., self.tokenizer.token_id_nospeech as i64))
+                    .i((.., self.tokenizer.token_id_no_speech as i64))
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
             }
 
@@ -641,20 +693,22 @@ impl<'a> DecodeTask<'a> {
         (tokens, sum_logprobs, no_speech_probs)
     }
 
-    pub fn run(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
+    pub fn run(&mut self, mel_audio: &Tensor) -> anyhow::Result<Vec<DecodeOutput>> {
         // without no_grad, pytorch will save the result of every operation for
         // calculating gradients which will cause the program to run out of
         // memory immediately
-        tch::no_grad(move || self.run_inner(mel.to_device(self.device)))
+        tch::no_grad(move || self.run_inner(mel_audio.to_device(self.device).unsqueeze(0)))
     }
 
-    fn run_inner(&mut self, mel: Tensor) -> anyhow::Result<Vec<DecodingResult>> {
-        let n_audio = mel.size()[0];
+    fn run_inner(&mut self, mel_audio: Tensor) -> anyhow::Result<Vec<DecodeOutput>> {
+        let (n_audio, _, n_frames) = mel_audio.size3().expect("2d mel spectrogram");
+
+        debug_assert_eq!(n_frames, audio::N_FRAMES);
 
         let initial_tokens: Vec<_> = self.initial_tokens.iter().map(|t| *t as i64).collect();
         // dbg!(&initial_tokens);
 
-        let audio_features = self.model.encoder.forward(&mel);
+        let audio_features = self.model.encoder.forward(&mel_audio);
         let repeated_tokens = Tensor::of_slice(&initial_tokens[..])
             .repeat(&[n_audio, 1])
             .to_device(self.device);
@@ -729,11 +783,12 @@ impl<'a> DecodeTask<'a> {
             .zip(&selected)
             .map(|(mut t, i)| t.remove(*i as usize))
             .collect();
-        let texts: Vec<_> = tokens.iter().map(|t| self.tokenizer.decode(t)).collect();
+        let texts: Result<Vec<_>, _> = tokens.iter().map(|t| self.tokenizer.decode(t)).collect();
+        let texts = texts?;
 
-        dbg!(&selected);
-        dbg!(&tokens);
-        dbg!(&texts);
+        // dbg!(&selected);
+        // dbg!(&tokens);
+        // dbg!(&texts);
 
         let sum_logprobs = selected
             .iter()
@@ -745,39 +800,71 @@ impl<'a> DecodeTask<'a> {
             .map(|(lp, t)| lp / (t.size()[0] as f64 + 1.))
             .collect();
 
-        println!("tokens = {tokens:?}");
-        println!("texts = {texts:?}");
-        println!("avg_logprobs = {avg_logprobs:?}");
+        let mut results = vec![];
 
-        Ok(vec![])
+        for (i, (((tokens, text), avg_logprob), no_speech_prob)) in tokens
+            .into_iter()
+            .zip(texts)
+            .zip(avg_logprobs)
+            .zip(Vec::<f64>::from(&no_speech_probs))
+            .enumerate()
+        {
+           results.push(DecodeOutput {
+                audio_features: audio_features.i(i as i64),
+                tokens,
+                text,
+                avg_logprob,
+                no_speech_prob,
+            });
+        }
 
-        // fields = (texts, languages, tokens, audio_features, avg_logprobs, no_speech_probs)
-        // if len(set(map(len, fields))) != 1:
-        //     raise RuntimeError(f"inconsistent result lengths: {list(map(len, fields))}")
-
-        // Ok(DecodingResult {
-        //     audio_features,
-        //     language,
-        //     tokens,
-        //     text,
-        //     avg_logprob,
-        //     no_speech_prob,
-        //     temperature,
-        //     compression_ratio: 0.,
-        // })
-
-        // return [
-        //     DecodingResult(
-        //         audio_features=features,
-        //         language=language,
-        //         tokens=tokens,
-        //         text=text,
-        //         avg_logprob=avg_logprob,
-        //         no_speech_prob=no_speech_prob,
-        //         temperature=self.options.temperature,
-        //         compression_ratio=compression_ratio(text),
+        // timestamp_tokens: torch.Tensor = tokens.ge(tokenizer.timestamp_begin)
+        // consecutive = torch.where(timestamp_tokens[:-1] & timestamp_tokens[1:])[0].add_(1)
+        // if len(consecutive) > 0:  # if the output contains two consecutive timestamp tokens
+        //     last_slice = 0
+        //     for current_slice in consecutive:
+        //         sliced_tokens = tokens[last_slice:current_slice]
+        //         start_timestamp_position = (
+        //             sliced_tokens[0].item() - tokenizer.timestamp_begin
+        //         )
+        //         end_timestamp_position = (
+        //             sliced_tokens[-1].item() - tokenizer.timestamp_begin
+        //         )
+        //         add_segment(
+        //             start=timestamp_offset + start_timestamp_position * time_precision,
+        //             end=timestamp_offset + end_timestamp_position * time_precision,
+        //             text_tokens=sliced_tokens[1:-1],
+        //             result=result,
+        //         )
+        //         last_slice = current_slice
+        //     last_timestamp_position = (
+        //         tokens[last_slice - 1].item() - tokenizer.timestamp_begin
         //     )
-        //     for text, language, tokens, features, avg_logprob, no_speech_prob in zip(*fields)
-        // ]
+        //     seek += last_timestamp_position * input_stride
+        //     all_tokens.extend(tokens[: last_slice + 1].tolist())
+        // else:
+        //     duration = segment_duration
+        //     timestamps = tokens[timestamp_tokens.nonzero().flatten()]
+        //     if len(timestamps) > 0 and timestamps[-1].item() != tokenizer.timestamp_begin:
+        //         # no consecutive timestamps but it has a timestamp; use the last one.
+        //         # single timestamp at the end means no speech after the last timestamp.
+        //         last_timestamp_position = timestamps[-1].item() - tokenizer.timestamp_begin
+        //         duration = last_timestamp_position * time_precision
+
+        //     add_segment(
+        //         start=timestamp_offset,
+        //         end=timestamp_offset + duration,
+        //         text_tokens=tokens,
+        //         result=result,
+        //     )
+
+        //     seek += segment.shape[-1]
+        //     all_tokens.extend(tokens.tolist())
+
+        // if not condition_on_previous_text or result.temperature > 0.5:
+        //     # do not feed the prompt tokens if a high temperature was used
+        //     prompt_reset_since = len(all_tokens)
+
+        Ok(results)
     }
 }

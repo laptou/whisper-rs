@@ -3,7 +3,7 @@ use tch::{nn::VarStore, Device};
 use whisper::{
     self,
     decode::{DecodeOptions, DecodeTask},
-    model::{ModelDims, Whisper},
+    model::{ModelDims, Whisper}, transcribe::{TranscribeTask, TranscribeOptions},
 };
 
 pub fn main() {
@@ -28,27 +28,24 @@ pub fn main() {
     vars.load("weights.ot").unwrap();
     vars.set_device(device);
 
-    let mut dt = DecodeTask::new(
+    let mut task = TranscribeTask::new(
         &model,
-        DecodeOptions {
-            task: whisper::tokenize::Task::Transcribe,
+        TranscribeOptions {
             sample_len: None,
             token_extract_mode: whisper::decode::TokenExtractMode::BeamSearch {
                 beam_size: 5,
                 patience: 1.0,
             },
             len_penalty: None,
+            max_initial_timestamp: Some(1.0),
+            suppress_blank: true,
+            suppress_tokens: Some(vec![]),
+            timestamps: true,
         },
     )
     .unwrap();
 
     let audio = whisper::audio::load_audio("test/data/jfk.flac").unwrap();
-    let mel_filter = whisper::audio::mel_filter();
-
-    let mel_audio = whisper::audio::log_mel_spectrogram(&audio, &mel_filter);
-    let mel_audio = whisper::audio::pad_or_trim(&mel_audio, whisper::audio::N_FRAMES);
-    let mel_audio = mel_audio
-        .unsqueeze(0);
-
-    dt.run(mel_audio).unwrap();
+    let output = task.run(&audio).unwrap();
+    println!("{output:?}");
 }
