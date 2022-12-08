@@ -1,3 +1,5 @@
 target/
 weights.npz
 weights.ot
+perf.data*
+flamegraph*
