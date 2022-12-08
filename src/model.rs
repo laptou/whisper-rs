@@ -5,7 +5,7 @@ use tch::{
     Device, IndexOp, Kind, NewAxis, Tensor,
 };
 
-use crate::audio::N_MELS;
+use crate::{audio::N_MELS, util::tensor_dbg};
 
 #[derive(Debug)]
 pub struct LayerNorm(nn::LayerNorm);
@@ -36,15 +36,33 @@ impl nn::Module for Linear {
 /// This implements the kv_cache function from whisper src
 pub struct Cached<T: nn::Module> {
     inner: T,
+    threshold: i64,
     cache: Cell<Option<Tensor>>,
 }
 
 impl<T: nn::Module> Cached<T> {
-    pub fn new(inner: T) -> Self {
+    pub fn new(inner: T, threshold: i64) -> Self {
         Self {
             inner,
+            threshold,
             cache: Cell::new(None),
         }
+    }
+
+    /// Used during beam search to update the cache to match the selected beams.
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        self.cache.set(match self.cache.take() {
+            Some(cache) => {
+                // tensor_dbg!(cache);
+                // tensor_dbg!(sources_indices);
+                Some(cache.index(&[Some(sources_indices)]))
+            }
+            None => None,
+        })
+    }
+
+    pub fn clear_cache(&self) {
+        self.cache.set(None);
     }
 }
 
@@ -60,12 +78,19 @@ impl<T: nn::Module> nn::Module for Cached<T> {
     fn forward(&self, xs: &tch::Tensor) -> tch::Tensor {
         let output = self.inner.forward(xs);
 
+        // tensor_dbg!(output);
+
         let output = match self.cache.take() {
-            Some(cache) if xs.size()[1] <= 512 => Tensor::cat(&[cache, output], 1).detach(),
+            Some(cache) if xs.size()[1] <= self.threshold => {
+                // tensor_dbg!(cache);
+                Tensor::cat(&[cache, output], 1).detach()
+            }
 
             // save as-is, for the first token or cross attention
             _ => output,
         };
+
+        // tensor_dbg!(output);
 
         self.cache.set(Some(output.i(..)));
         output
@@ -96,7 +121,7 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
-    pub fn new<'a>(vs: nn::Path<'a>, n_states: i64, n_heads: i64) -> Self {
+    pub fn new<'a>(vs: nn::Path<'a>, n_states: i64, n_heads: i64, cache_threshold: i64) -> Self {
         Self {
             n_heads,
             query: nn::linear(
@@ -105,21 +130,27 @@ impl MultiHeadAttention {
                 n_states,
                 nn::LinearConfig::default(),
             ),
-            key: Cached::new(nn::linear(
-                &vs / "key",
-                n_states,
-                n_states,
-                nn::LinearConfig {
-                    bias: false,
-                    ..Default::default()
-                },
-            )),
-            value: Cached::new(nn::linear(
-                &vs / "value",
-                n_states,
-                n_states,
-                nn::LinearConfig::default(),
-            )),
+            key: Cached::new(
+                nn::linear(
+                    &vs / "key",
+                    n_states,
+                    n_states,
+                    nn::LinearConfig {
+                        bias: false,
+                        ..Default::default()
+                    },
+                ),
+                cache_threshold,
+            ),
+            value: Cached::new(
+                nn::linear(
+                    &vs / "value",
+                    n_states,
+                    n_states,
+                    nn::LinearConfig::default(),
+                ),
+                cache_threshold,
+            ),
             out: nn::linear(&vs / "out", n_states, n_states, nn::LinearConfig::default()),
         }
     }
@@ -129,6 +160,7 @@ impl MultiHeadAttention {
         let k = self.key.forward(xa.unwrap_or(&xs));
         let v = self.value.forward(xa.unwrap_or(&xs));
 
+        // tensor_dbg!(xs);
         // tensor_dbg!(q);
         // tensor_dbg!(k);
         // tensor_dbg!(v);
@@ -172,6 +204,16 @@ impl MultiHeadAttention {
 
         self.out.forward(&wv)
     }
+
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        self.value.update_cache(sources_indices);
+        self.key.update_cache(sources_indices);
+    }
+
+    pub fn clear_cache(&self) {
+        self.value.clear_cache();
+        self.key.clear_cache();
+    }
 }
 
 impl nn::Module for MultiHeadAttention {
@@ -200,10 +242,16 @@ pub struct ResidualAttentionBlock {
 }
 
 impl ResidualAttentionBlock {
-    pub fn new<'a>(vs: nn::Path<'a>, n_states: i64, n_heads: i64, cross_attn: bool) -> Self {
+    pub fn new<'a>(
+        vs: nn::Path<'a>,
+        n_states: i64,
+        n_heads: i64,
+        cross_attn: bool,
+        cache_threshold: i64,
+    ) -> Self {
         let n_mlps = n_states * 4;
         Self {
-            attn: MultiHeadAttention::new(&vs / "attn", n_states, n_heads),
+            attn: MultiHeadAttention::new(&vs / "attn", n_states, n_heads, cache_threshold),
             attn_ln: nn::layer_norm(
                 &vs / "attn_ln",
                 vec![n_states],
@@ -214,6 +262,7 @@ impl ResidualAttentionBlock {
                     &vs / "cross_attn",
                     n_states,
                     n_heads,
+                    cache_threshold,
                 ))
             } else {
                 None
@@ -268,6 +317,22 @@ impl ResidualAttentionBlock {
         // tensor_dbg!(x);
         x
     }
+
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        self.attn.update_cache(sources_indices);
+
+        if let Some(cross_attn) = &self.cross_attn {
+            cross_attn.update_cache(sources_indices);
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        self.attn.clear_cache();
+
+        if let Some(cross_attn) = &self.cross_attn {
+            cross_attn.clear_cache();
+        }
+    }
 }
 
 impl Module for ResidualAttentionBlock {
@@ -317,7 +382,15 @@ impl AudioEncoder {
                 },
             ),
             blocks: (0..n_layers)
-                .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, false))
+                .map(|i| {
+                    ResidualAttentionBlock::new(
+                        &vs / "blocks" / i,
+                        n_states,
+                        n_heads,
+                        false,
+                        n_ctxs,
+                    )
+                })
                 .collect(),
             position_emb: sinusoids(n_ctxs, n_states, None, device),
             ln_post: nn::layer_norm(
@@ -325,6 +398,18 @@ impl AudioEncoder {
                 vec![n_states],
                 nn::LayerNormConfig::default(),
             ),
+        }
+    }
+
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        for block in &self.blocks {
+            block.update_cache(sources_indices);
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        for block in &self.blocks {
+            block.clear_cache();
         }
     }
 }
@@ -390,7 +475,9 @@ impl TextDecoder {
                 .fill_(f64::NEG_INFINITY)
                 .triu_(1),
             blocks: (0..n_layers)
-                .map(|i| ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, true))
+                .map(|i| {
+                    ResidualAttentionBlock::new(&vs / "blocks" / i, n_states, n_heads, true, n_ctxs)
+                })
                 .collect(),
             ln_pre: nn::layer_norm(&vs / "ln", vec![n_states], nn::LayerNormConfig::default()),
         }
@@ -432,6 +519,18 @@ impl TextDecoder {
 
         // tensor_dbg!(x);
         x.matmul(&self.token_emb.ws.transpose(0, 1))
+    }
+
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        for block in &self.blocks {
+            block.update_cache(sources_indices);
+        }
+    }
+
+    pub fn clear_cache(&self) {
+        for block in &self.blocks {
+            block.clear_cache();
+        }
     }
 }
 
@@ -487,6 +586,16 @@ impl Whisper {
     pub fn forward_ext(&self, mel: &Tensor, tokens: &Tensor) -> Tensor {
         self.decoder
             .forward_ext(tokens, &self.encoder.forward(mel), 0)
+    }
+
+    pub fn update_cache(&self, sources_indices: &Tensor) {
+        self.decoder.update_cache(sources_indices);
+        self.encoder.update_cache(sources_indices);
+    }
+
+    pub fn clear_cache(&self) {
+        self.decoder.clear_cache();
+        self.encoder.clear_cache();
     }
 
     pub fn device(&self) -> Device {

@@ -6,11 +6,13 @@ use std::rc::Rc;
 use tch::{nn::Module, Device, IndexOp, Kind, NewAxis, Tensor};
 
 use crate::audio;
+use crate::util::tensor_dbg;
 use crate::{
     model::Whisper,
     tokenize::{Task, Tokenizer},
 };
 
+#[derive(Debug)]
 pub struct DecodeTask<'a> {
     model: &'a Whisper,
     options: DecodeOptions,
@@ -25,20 +27,6 @@ pub struct DecodeTask<'a> {
     token_extractor: Box<dyn TokenExtractor>,
     sequence_ranker: Box<dyn SequenceRanker>,
     sample_len: i64,
-}
-
-impl<'a> Debug for DecodeTask<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DecodeTask")
-            .field("model", &self.model)
-            .field("options", &self.options)
-            .field("device", &self.device)
-            .field("tokenizer", &self.tokenizer)
-            .field("logit_filters", &self.logit_filters)
-            .field("token_extractor", &self.token_extractor)
-            .field("sequence_ranker", &self.sequence_ranker)
-            .finish()
-    }
 }
 
 #[derive(Debug)]
@@ -60,7 +48,7 @@ impl DecodePrompt {
             // if we have a prompt, concat the start-of-previous sequence, the
             // prompt, and the start-of-transcript sequence
 
-            let mut initial_tokens = Tensor::empty(
+            let initial_tokens = Tensor::empty(
                 &[1 + prompt.size1().unwrap() + seq_sot.len() as i64],
                 (Kind::Int64, device),
             );
@@ -77,12 +65,18 @@ impl DecodePrompt {
                 .narrow(0, 1 + prompt.size1().unwrap(), seq_sot.len() as i64)
                 .copy_(&Tensor::of_slice(seq_sot.as_slice()));
 
+            tensor_dbg!(prompt);
+
             initial_tokens
         } else {
             Tensor::of_slice(seq_sot.as_slice())
         };
 
+        tensor_dbg!(initial_tokens);
+
         let sample_begin = initial_tokens.size1().unwrap();
+
+        dbg!(sample_begin);
 
         let sot_idx = initial_tokens
             .eq(tokenizer.token_id_sot as i64)
@@ -106,6 +100,7 @@ pub struct DecodeOptions {
     pub max_initial_timestamp: Option<f64>,
     pub timestamps: bool,
     pub suppress_blank: bool,
+    pub suppress_non_speech: bool,
     pub suppress_tokens: Option<Vec<u32>>,
     pub prompt: Option<Tensor>,
 }
@@ -157,6 +152,7 @@ trait TokenExtractor: Debug {
     ///     True if all sequences has reached the end of text
     fn update(
         &mut self,
+        model: &Whisper,
         tokens: Tensor,
         logits: Tensor,
         sum_logprobs: &mut Tensor,
@@ -196,6 +192,7 @@ impl TokenExtractor for GreedyTokenExtractor {
 
     fn update(
         &mut self,
+        _model: &Whisper,
         tokens: Tensor,
         logits: Tensor,
         sum_logprobs: &mut Tensor,
@@ -259,6 +256,7 @@ impl TokenExtractor for BeamSearchTokenExtractor {
 
     fn update(
         &mut self,
+        model: &Whisper,
         tokens: Tensor,
         logits: Tensor,
         sum_logprobs: &mut Tensor,
@@ -345,6 +343,11 @@ impl TokenExtractor for BeamSearchTokenExtractor {
 
         let tokens = Tensor::of_slice2(&next_tokens[..]);
 
+        let sources_indices = Tensor::of_slice(&source_indices[..]);
+        // update caches in multi-head attn blocks to match the beams that we
+        // selected
+        model.update_cache(&sources_indices);
+
         // add newly finished sequences to self.finished_sequences
         debug_assert_eq!(
             self.finished_sequences.as_ref().unwrap().len(),
@@ -372,6 +375,8 @@ impl TokenExtractor for BeamSearchTokenExtractor {
         // mark as completed if all audio has enough number of samples
         let completed = self
             .finished_sequences
+            .as_ref()
+            .unwrap()
             .iter()
             .all(|seq| seq.len() >= max_candidates);
 
@@ -676,8 +681,14 @@ impl<'a> DecodeTask<'a> {
             )));
         }
 
-        if let Some(tokens) = &options.suppress_tokens {
-            logit_filters.push(Box::new(SuppressTokens::new(&tokens[..], device)));
+        if options.suppress_tokens.is_some() || options.suppress_non_speech {
+            let mut suppress_tokens = options.suppress_tokens.clone().unwrap_or(vec![]);
+
+            if options.suppress_non_speech {
+                suppress_tokens.extend(tokenizer.non_speech_tokens());
+            }
+
+            logit_filters.push(Box::new(SuppressTokens::new(&suppress_tokens[..], device)));
         }
 
         if options.timestamps {
@@ -712,6 +723,15 @@ impl<'a> DecodeTask<'a> {
     }
 
     pub fn set_prompt(&mut self, prompt: Option<&Tensor>) {
+        // replace empty tensor w/ None
+        let prompt = prompt.and_then(|p| {
+            if p.size1().unwrap() > 0 {
+                Some(p)
+            } else {
+                None
+            }
+        });
+
         self.prompt
             .replace(DecodePrompt::new(prompt, &*self.tokenizer, self.device));
     }
@@ -739,8 +759,12 @@ impl<'a> DecodeTask<'a> {
                     tokens = tokens.slice(-1, -1, None, 1);
                 }
 
+                // tensor_dbg!(tokens);
                 self.model.decoder.forward_ext(&tokens, &audio_features, i)
             };
+
+            // tensor_dbg!(logits);
+            // tensor_dbg!(tokens);
 
             if i == 0 {
                 let probs_at_sot = logits.i((.., prompt.sot_idx as i64)).softmax(-1, dtype.0);
@@ -749,21 +773,29 @@ impl<'a> DecodeTask<'a> {
                     .copy_data(&mut no_speech_probs[..], n_batch as usize);
             }
 
+            // now we need to consider the logits at the last token only
             let mut logits = logits.i((.., -1));
 
+            // apply the logit filters, e.g. for suppressing or applying penalty to
             for filter in &self.logit_filters {
                 filter.apply(&mut logits, &tokens);
+                // tensor_dbg!(logits);
             }
 
+            // expand the tokens tensor with the selected next tokens
             let (new_tokens, completed) =
                 self.token_extractor
-                    .update(tokens, logits, &mut sum_logprobs);
+                    .update(&self.model, tokens, logits, &mut sum_logprobs);
             tokens = new_tokens.to_device(self.device);
+
+            // tensor_dbg!(tokens);
 
             if completed || *tokens.size().last().unwrap() > self.model.dims.n_text_ctxs {
                 break;
             }
         }
+
+        self.model.clear_cache();
 
         (tokens, sum_logprobs, no_speech_probs)
     }
@@ -805,6 +837,15 @@ impl<'a> DecodeTask<'a> {
         // tensor_dbg!(&audio_features);
         // tensor_dbg!(&repeated_tokens);
 
+        // this is necessary b/c we run the encoder, which causes values to be
+        // persisted into its cache which messes things up later when beam
+        // search tries to update the cache
+
+        // TODO: solve this properly by removing caches in the encoder? doesn't
+        // seem like they are used anyway
+        self.model.clear_cache();
+        self.token_extractor.reset();
+
         // call the main sampling loop
         let (tokens, sum_logprobs, no_speech_probs) =
             self.main_loop(&audio_features, repeated_tokens);
@@ -843,6 +884,8 @@ impl<'a> DecodeTask<'a> {
                             .eq(self.tokenizer.token_id_eot as i64)
                             .nonzero()
                             .int64_value(&[0, 0]);
+
+                        tensor_dbg!(t);
 
                         t.i(sample_begin..end)
                     })

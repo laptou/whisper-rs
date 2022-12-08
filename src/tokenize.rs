@@ -181,7 +181,7 @@ impl Tokenizer {
             token_id_startofprev: tokenizer.token_to_id("<|startofprev|>").unwrap(),
             token_id_startoflm: tokenizer.token_to_id("<|startoflm|>").unwrap(),
             // timestamp tokens are not real tokens, instead they are numbers
-            // that are outside the range of the tokenizer 
+            // that are outside the range of the tokenizer
             token_id_ts_begin: *special_token_ids.last().unwrap() + 1,
             tokenizer,
         })
@@ -191,6 +191,108 @@ impl Tokenizer {
         // TODO: add sot sequence for translation
         // vec![self.token_id_sot, self.token_id_transcribe]
         vec![self.token_id_sot]
+    }
+
+    /// Returns the list of tokens to suppress in order to avoid any speaker tags or non-speech
+    /// annotations, to prevent sampling texts that are not actually spoken in the audio, e.g.
+    ///
+    /// - ♪♪♪
+    /// - ( SPEAKING FOREIGN LANGUAGE )
+    /// - [DAVID] Hey there,
+    ///
+    /// keeping basic punctuations like commas, periods, question marks, exclamation points, etc.
+    pub fn non_speech_tokens(&self) -> Vec<u32> {
+        let symbols = vec![
+            "\"",
+            "#",
+            "(",
+            ")",
+            "*",
+            "+",
+            "/",
+            ":",
+            ";",
+            "<",
+            "=",
+            ">",
+            "@",
+            "[",
+            "\\",
+            "]",
+            "^",
+            "_",
+            "`",
+            "{",
+            "|",
+            "}",
+            "~",
+            "「",
+            "」",
+            "『",
+            "』",
+            "<<",
+            ">>",
+            "<<<",
+            ">>>",
+            "--",
+            "---",
+            "-(",
+            "-[",
+            "('",
+            "(\"",
+            "((",
+            "))",
+            "(((",
+            ")))",
+            "[[",
+            "]]",
+            "{{",
+            "}}",
+            "♪♪",
+            "♪♪♪",
+        ];
+
+        // allow hyphens "-" and single quotes "'" between words, but not at the beginning of a word
+        let mut result = vec![
+            self.tokenizer.encode(" -", true).unwrap().get_ids()[0],
+            self.tokenizer.encode(" '", true).unwrap().get_ids()[0],
+        ];
+
+        for symbol in symbols {
+            let tokens = self.tokenizer.encode(symbol, true).unwrap();
+            if tokens.get_ids().len() == 1 {
+                result.push(tokens.get_ids()[0]);
+            }
+
+            let tokens = self
+                .tokenizer
+                .encode(" ".to_owned() + symbol, true)
+                .unwrap();
+            if tokens.get_ids().len() == 1 {
+                result.push(tokens.get_ids()[0]);
+            }
+        }
+
+        let misc = vec![
+            // In case they're multiple tokens, suppress the first token, which is safe because:
+            // These are between U+2640 and U+267F miscellaneous symbols that are okay to suppress
+            // in generations, and in the 3-byte UTF-8 representation they share the first two bytes.
+            "♩", "♪", "♫", "♬", "♭", "♮", "♯",
+        ];
+
+        for symbol in misc {
+            let tokens = self.tokenizer.encode(symbol, true).unwrap();
+            result.push(tokens.get_ids()[0]);
+
+            let tokens = self
+                .tokenizer
+                .encode(" ".to_owned() + symbol, true)
+                .unwrap();
+            result.push(tokens.get_ids()[0]);
+        }
+
+        result.sort();
+        result
     }
 
     pub fn decode(&self, tokens: &Tensor) -> anyhow::Result<String> {

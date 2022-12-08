@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use anyhow::Context;
-use tch::{IndexOp, Kind, Tensor};
+use tch::{IndexOp, Tensor};
 
 use crate::{
     audio::{self, N_FRAMES},
@@ -25,7 +25,6 @@ pub struct TranscribeTask<'a> {
 pub enum TranscribePrompt {
     Pretokenized(Vec<u32>),
     Text(String),
-
     None { condition_on_prev_text: bool },
 }
 
@@ -38,6 +37,7 @@ pub struct TranscribeOptions {
     pub max_initial_timestamp: Option<f64>,
     pub timestamps: bool,
     pub suppress_blank: bool,
+    pub suppress_non_speech: bool,
     pub suppress_tokens: Option<Vec<u32>>,
 
     // transcribe options
@@ -82,6 +82,7 @@ impl<'a> TranscribeTask<'a> {
                 timestamps: options.timestamps,
                 suppress_blank: options.suppress_blank,
                 suppress_tokens: options.suppress_tokens,
+                suppress_non_speech: options.suppress_non_speech,
                 // prompt is set at runtime loop
                 prompt: None,
             },

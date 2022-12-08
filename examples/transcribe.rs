@@ -40,6 +40,7 @@ pub fn main() {
             len_penalty: None,
             max_initial_timestamp: Some(1.0),
             suppress_blank: true,
+            suppress_non_speech: true,
             suppress_tokens: Some(vec![]),
             timestamps: true,
             prompt: TranscribePrompt::None {
@@ -49,7 +50,7 @@ pub fn main() {
     )
     .unwrap();
 
-    let audio = whisper::audio::load_audio("test/data/export.mp3").unwrap();
+    let audio = whisper::audio::load_audio("test/data/export_resampled.wav").unwrap();
     let output = task.run(&audio).unwrap();
     println!("{output:?}");
 }
