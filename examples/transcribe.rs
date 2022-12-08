@@ -58,7 +58,9 @@ pub fn main() {
     .unwrap();
     info!("initialized transcription task");
 
-    let audio = whisper::audio::load_audio("test/data/export.mp3").unwrap();
+    // mp3 loader is crazy slow in dev mode, so we load a preconverted wav for
+    // convenience
+    let audio = whisper::audio::load_audio("test/data/export_resampled.wav").unwrap();
     info!("loaded audio");
 
     let output = task.run(&audio).unwrap();

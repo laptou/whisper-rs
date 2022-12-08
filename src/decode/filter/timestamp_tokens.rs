@@ -45,13 +45,10 @@ impl LogitFilter for TimestampTokens {
         // timestamps have to appear in pairs, except directly before EOT; mask
         // logits accordingly
         for k in 0..tokens.size()[0] {
-            let seq: Vec<i64> = tokens.i((k, sample_begin..)).into();
-            let last_was_timestamp = match seq.last() {
-                Some(&last) => last >= token_id_timestampbegin,
-                None => false,
-            };
+            let seq = tokens.i((k, sample_begin..));
+            let last_was_timestamp = seq.size1().unwrap() >= 1 && seq.int64_value(&[-1]) >= token_id_timestampbegin; 
             let second_last_was_timestamp =
-                seq.len() < 2 || seq[seq.len() - 2] >= token_id_timestampbegin;
+                seq.size1().unwrap() < 2 || seq.int64_value(&[-2]) >= token_id_timestampbegin;
 
             if last_was_timestamp {
                 if second_last_was_timestamp {
