@@ -44,6 +44,9 @@ pub struct TranscribeOptions {
     /// Initial prompt for transcription, which is prepended to the input and to
     /// the output.
     pub prompt: TranscribePrompt,
+
+    // common options
+    pub tokenizer: Tokenizer,
 }
 
 #[derive(Debug)]
@@ -67,8 +70,7 @@ impl<'a> TranscribeTask<'a> {
     pub fn new(model: &'a Whisper, options: TranscribeOptions) -> anyhow::Result<Self> {
         let device = model.device();
 
-        let tokenizer =
-            Rc::new(Tokenizer::new(Task::Transcribe).context("failed to create tokenizer")?);
+        let tokenizer = Rc::new(options.tokenizer);
 
         let decode_task = DecodeTask::new(
             model,

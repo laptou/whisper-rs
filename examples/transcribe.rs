@@ -4,6 +4,7 @@ use tracing::info;
 use whisper::{
     self,
     model::{ModelDims, Whisper},
+    tokenize::{Task, Tokenizer},
     transcribe::{TranscribeOptions, TranscribePrompt, TranscribeTask},
 };
 
@@ -15,7 +16,7 @@ pub fn main() {
     )
     .unwrap();
 
-    let device = Device::cuda_if_available();
+    let device = Device::Cpu;
     info!("using device {device:?}");
 
     let mut vars = VarStore::new(device);
@@ -36,6 +37,8 @@ pub fn main() {
     vars.load("weights.ot").unwrap();
     info!("loaded model weights");
 
+    let tokenizer = Tokenizer::new_from_file(Task::Transcribe, "tokenizer/gpt2.json").unwrap();
+
     let mut task = TranscribeTask::new(
         &model,
         TranscribeOptions {
@@ -48,11 +51,12 @@ pub fn main() {
             max_initial_timestamp: Some(1.0),
             suppress_blank: true,
             suppress_non_speech: true,
-            suppress_tokens: Some(vec![]),
+            suppress_tokens: None,
             timestamps: true,
             prompt: TranscribePrompt::None {
                 condition_on_prev_text: true,
             },
+            tokenizer,
         },
     )
     .unwrap();
@@ -60,7 +64,7 @@ pub fn main() {
 
     // mp3 loader is crazy slow in dev mode, so we load a preconverted wav for
     // convenience
-    let audio = whisper::audio::load_audio("test/data/export_resampled.wav").unwrap();
+    let audio = whisper::audio::load_audio("test/data/jfk_resampled.wav").unwrap();
     info!("loaded audio");
 
     let output = task.run(&audio).unwrap();

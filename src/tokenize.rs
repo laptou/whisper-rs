@@ -1,5 +1,6 @@
-use std::{collections::HashMap, ops::Deref};
+use std::{collections::HashMap, ops::Deref, path::Path};
 
+use anyhow::{bail, Context};
 use once_cell::sync::Lazy;
 use tch::Tensor;
 
@@ -138,14 +139,18 @@ pub enum Task {
 
 impl Tokenizer {
     /// Simple implementation of tokenizer, only works for english.
-    pub fn new(task: Task) -> anyhow::Result<Self> {
+    pub fn new_from_bytes(task: Task, bytes: impl AsRef<[u8]>) -> anyhow::Result<Self> {
         assert_eq!(
             task,
             Task::Transcribe,
             "multilingual tokenizer is not implemented yet so translation is not possible"
         );
 
-        let mut tokenizer = tokenizers::Tokenizer::from_pretrained("gpt2", None).unwrap();
+        let mut tokenizer = match tokenizers::Tokenizer::from_bytes(bytes) {
+            Ok(t) => t,
+            Err(e) => bail!("failed to create tokenizer: {e}"),
+        };
+
         let special_tokens: Vec<_> = ["<|startoftranscript|>"]
             .iter()
             .map(|s| (*s).to_owned())
@@ -186,6 +191,12 @@ impl Tokenizer {
             tokenizer,
         })
     }
+
+    pub fn new_from_file(task: Task, path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let bytes = std::fs::read(path).context("failed to read tokenizer file")?;
+        Self::new_from_bytes(task, bytes)
+    }
+
 
     pub fn sequence_sot(&self) -> Vec<u32> {
         // TODO: add sot sequence for translation
