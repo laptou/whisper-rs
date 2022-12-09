@@ -3,3 +3,4 @@ weights.npz
 weights.ot
 perf.data*
 flamegraph*
+.cargo
