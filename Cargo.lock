@@ -1224,7 +1224,7 @@ dependencies = [
 [[package]]
 name = "tch"
 version = "0.10.0"
-source = "git+https://github.com/laptou/tch-rs?rev=b9059606cf0ba2d3d179cb346af7d99fc96b78e8#b9059606cf0ba2d3d179cb346af7d99fc96b78e8"
+source = "git+https://github.com/laptou/tch-rs?branch=main#0d0d6dbf46a364d9899268e00d0deb1326e37993"
 dependencies = [
  "half",
  "lazy_static",
@@ -1326,7 +1326,7 @@ dependencies = [
 [[package]]
 name = "torch-sys"
 version = "0.10.0"
-source = "git+https://github.com/laptou/tch-rs?rev=b9059606cf0ba2d3d179cb346af7d99fc96b78e8#b9059606cf0ba2d3d179cb346af7d99fc96b78e8"
+source = "git+https://github.com/laptou/tch-rs?branch=main#0d0d6dbf46a364d9899268e00d0deb1326e37993"
 dependencies = [
  "anyhow",
  "cc",
