@@ -2,5 +2,8 @@
   "lldb.showDisassembly": "auto",
   "lldb.dereferencePointers": true,
   "lldb.consoleMode": "evaluate",
-  "lldb.displayFormat": "auto"
+  "lldb.displayFormat": "auto",
+  "rust-analyzer.cargo.extraEnv": {
+    "LIBTORCH": "/home/ibiyemi/Downloads/libtorch-cxx11-abi-shared-with-deps-1.13.0+cu117/libtorch"
+  }
 }
